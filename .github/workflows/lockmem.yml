@@ -1,0 +1,17 @@
+name: Builds
+
+on: [push, pull_request]
+
+jobs:
+  Windows:
+    name: Windows latest
+    runs-on: windows-latest 
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Add msbuild to PATH
+      uses: microsoft/setup-msbuild@v1.0.0
+
+    - name: Build
+      run: nmake
