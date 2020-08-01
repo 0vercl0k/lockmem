@@ -1,4 +1,5 @@
 # lockmem
+![Builds](https://github.com/0vercl0k/lockmem/workflows/Builds/badge.svg)
 
 This utility allows you to lock every available memory regions of an arbitrary process into its working set.
 It uses `ntdll!NtLockVirtualMemory` (syscall used internally by [VirtualLock](https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtuallock)) to lock memory ranges as well as [GetProcessWorkingSetSizeEx](https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-getprocessworkingsetsizeex) and [SetProcessWorkingSetSizeEx](https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-setprocessworkingsetsizeex) to increase the size of the process' working set.
