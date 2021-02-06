@@ -11,3 +11,7 @@ The Windows kernel guarantees that those pages will stay resident in memory, not
 ## Build
 
 You can build the project using [Visual Studio 2019]() or `msbuild` using the solution file: `src/lockmem.sln`
+
+# Authors
+
+* Axel '[@0vercl0k](https://twitter.com/0vercl0k)' Souchet
