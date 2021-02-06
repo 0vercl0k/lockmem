@@ -5,7 +5,13 @@ on: [push, pull_request]
 jobs:
   Windows:
     name: Windows latest
-    runs-on: windows-latest 
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ['x86', 'x64']
+        configuration: ['Debug', 'Release']
+
     steps:
     - name: Checkout
       uses: actions/checkout@v2
@@ -13,11 +19,17 @@ jobs:
     - name: Setup vs prompt
       uses: ilammy/msvc-dev-cmd@v1
 
-    - name: Build
-      run: nmake
+    - name: Build all
+      run: msbuild -m /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} src\lockmem.sln
 
-    - name: Upload artifacts
+    - name: Upload x64 artifacts
+      uses: actions/upload-artifact@v2
+      if: ${{ matrix.platform == 'x64' }}
       uses: actions/upload-artifact@v2
       with:
-        name: bin
-        path: bin
+        name: bin-${{ matrix.platform }}.${{ matrix.configuration }}
+        path: |
+          src/**/${{ matrix.configuration }}/lockmem.exe
+          src/**/${{ matrix.configuration }}/lockmem.pdb
+          src/**/${{ matrix.configuration }}/lockmem-drv.sys
+          src/**/${{ matrix.configuration }}/lockmem-drv.pdb

@@ -10,18 +10,4 @@ The Windows kernel guarantees that those pages will stay resident in memory, not
 
 ## Build
 
-```text
-(base) c:\lockmem\src>nmake
-
-Microsoft (R) Program Maintenance Utility Version 14.26.28806.0
-Copyright (C) Microsoft Corporation.  All rights reserved.
-
-        if not exist ..\bin mkdir ..\bin
-        cl /O1 /nologo /ZI /W3 /D_AMD64_ /DWIN_X64 /sdl /Fe..\bin\lockmem.exe lockmem.cc /link /nologo /debug:full ntdll.lib
-lockmem.cc
-        del *.obj *.pdb *.idb
-        if exist .\bin del bin\*.exp bin\*.ilk bin\*.lib
-
-(base) c:\lockmem\src>..\bin\lockmem.exe
-./lockme <process name | pid>
-```
+You can build the project using [Visual Studio 2019]() or `msbuild` using the solution file: `src/lockmem.sln`
