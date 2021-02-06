@@ -21,8 +21,7 @@ jobs:
     - name: Build all
       run: msbuild -m /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} src\lockmem.sln
 
-    - name: Upload x64 artifacts
-      if: ${{ matrix.platform == 'x64' }}
+    - name: Upload artifacts
       uses: actions/upload-artifact@v2
       with:
         name: bin-${{ matrix.platform }}.${{ matrix.configuration }}
