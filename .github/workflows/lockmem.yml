@@ -11,7 +11,6 @@ jobs:
       matrix:
         platform: ['x86', 'x64']
         configuration: ['Debug', 'Release']
-
     steps:
     - name: Checkout
       uses: actions/checkout@v2
@@ -23,7 +22,6 @@ jobs:
       run: msbuild -m /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} src\lockmem.sln
 
     - name: Upload x64 artifacts
-      uses: actions/upload-artifact@v2
       if: ${{ matrix.platform == 'x64' }}
       uses: actions/upload-artifact@v2
       with:
