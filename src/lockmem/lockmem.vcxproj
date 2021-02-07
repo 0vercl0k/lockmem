@@ -143,7 +143,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="install.cc" />
     <ClCompile Include="lockmem.cc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="install.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

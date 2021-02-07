@@ -1,7 +1,5 @@
 // Axel '0vercl0k' Souchet - February 6 2021
-#define POOL_ZERO_DOWN_LEVEL_SUPPORT
-#include <ntifs.h>
-#include <ntintsafe.h>
+#include "lockmem-drv.h"
 
 //
 // Turn on debug outputs:
@@ -12,86 +10,6 @@
 // Endless source of inspiration:
 //   - ProcessHacker's source code.
 //
-
-#if defined(_M_ARM) || defined(_M_ARM64)
-#    error "ARM platforms are not supported."
-#endif
-
-//
-// Undocumented?
-//
-
-extern NTSTATUS
-ZwQueryDirectoryObject(
-    _In_ HANDLE DirectoryHandle,
-    _Out_opt_ PVOID Buffer,
-    _In_ ULONG Length,
-    _In_ BOOLEAN ReturnSingleEntry,
-    _In_ BOOLEAN RestartScan,
-    _Inout_ PULONG Context,
-    _Out_opt_ PULONG ReturnLength);
-
-extern NTSTATUS
-ObOpenObjectByName(
-    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
-    _In_opt_ POBJECT_TYPE ObjectType,
-    _In_ KPROCESSOR_MODE AccessMode,
-    _Inout_opt_ PACCESS_STATE AccessState,
-    _In_opt_ ACCESS_MASK DesiredAccess,
-    _Inout_opt_ PVOID ParseContext,
-    _Out_ PHANDLE Handle);
-
-extern POBJECT_TYPE *IoDriverObjectType;
-
-typedef struct _OBJECT_DIRECTORY_INFORMATION
-{
-    UNICODE_STRING Name;
-    UNICODE_STRING TypeName;
-} OBJECT_DIRECTORY_INFORMATION, *POBJECT_DIRECTORY_INFORMATION;
-
-//
-// Declare functions.
-//
-
-_Function_class_(DRIVER_INITIALIZE) _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
-NTSTATUS
-DriverEntry(_In_ PDRIVER_OBJECT, _In_ PUNICODE_STRING);
-
-_Function_class_(DRIVER_UNLOAD) _IRQL_requires_(PASSIVE_LEVEL)
-_IRQL_requires_same_ VOID
-LckDriverUnload(_In_ PDRIVER_OBJECT);
-
-_IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
-NTSTATUS
-LckDoWork();
-
-_IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
-NTSTATUS
-LckHandleEntry(_In_ HANDLE, _In_ POBJECT_DIRECTORY_INFORMATION, _Inout_opt_ PVOID);
-
-typedef NTSTATUS (*DIRECTORY_CALLBACK)(_In_ HANDLE, _In_ POBJECT_DIRECTORY_INFORMATION, _Inout_opt_ PVOID);
-
-_IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
-NTSTATUS
-LckWalkDirectoryEntries(_In_ HANDLE, _In_ DIRECTORY_CALLBACK, _Inout_opt_ PVOID);
-
-//
-// Our code doesn't need to be allocated in non-paged memory.
-// There is no functions running above APC_LEVEL as a result page faults
-// are allowed.
-// DriverEntry is in the INIT segment which gets discarded once the driver
-// as been initialized.
-//
-
-#ifdef ALLOC_PRAGMA
-#    pragma alloc_text(INIT, DriverEntry)
-#    pragma alloc_text(PAGE, LckDriverUnload)
-#    pragma alloc_text(PAGE, LckDoWork)
-#    pragma alloc_text(PAGE, LckHandleEntry)
-#    pragma alloc_text(PAGE, LckWalkDirectoryEntries)
-#endif
-
-#define LCK_TAG ' kcL'
 
 _Function_class_(DRIVER_UNLOAD) _IRQL_requires_(PASSIVE_LEVEL)
 _IRQL_requires_same_ VOID
@@ -284,6 +202,59 @@ Return Value:
 
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
+LckForcePagingIn(_In_ PVOID ImageBase, _In_ ULONG ImageSize)
+
+/*++
+
+Routine Description:
+
+    Force paging in of a driver.
+
+Arguments:
+
+    ImageBase - Base address of the driver.
+
+    ImageSize - Size of the driver.
+
+Return Value:
+
+    Status.
+
+--*/
+
+{
+    UNREFERENCED_PARAMETER(ImageSize);
+    NTSTATUS Status = STATUS_SUCCESS;
+    PIMAGE_DOS_HEADER DosHeader = NULL;
+    PIMAGE_NT_HEADERS NtHeaders = NULL;
+    PIMAGE_SECTION_HEADER SectionHeaders = NULL;
+
+    PAGED_CODE();
+
+    //
+    // Do the PE dance.
+    //
+
+    DosHeader = (PIMAGE_DOS_HEADER)ImageBase;
+    NtHeaders = (PIMAGE_NT_HEADERS)((PUCHAR)ImageBase + DosHeader->e_lfanew);
+    SectionHeaders = (PIMAGE_SECTION_HEADER)(
+        (PUCHAR)NtHeaders + FIELD_OFFSET(IMAGE_NT_HEADERS, OptionalHeader) +
+        NtHeaders->FileHeader.SizeOfOptionalHeader);
+
+    //
+    // Walk through the sections.
+    //
+
+    for (ULONG Idx = 0; Idx < NtHeaders->FileHeader.NumberOfSections; Idx++)
+    {
+        KdPrint(("  Section %x - %x\n", Idx, SectionHeaders[Idx].VirtualAddress));
+    }
+
+    return Status;
+}
+
+_IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
+NTSTATUS
 LckHandleEntry(
     _In_ HANDLE DirectoryHandle,
     _In_ POBJECT_DIRECTORY_INFORMATION ObjectDirectoryInfo,
@@ -322,6 +293,10 @@ Return Value:
     InitializeObjectAttributes(
         &ObjectAttributes, &ObjectDirectoryInfo->Name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, DirectoryHandle, NULL);
 
+    //
+    // If the TypeName doesn't say it is a 'Driver' we skip it because it is unexpected.
+    //
+
     if (RtlCompareUnicodeString(&Driver, &ObjectDirectoryInfo->TypeName, FALSE) != 0)
     {
         KdPrint(("Skipping %wZ because it is not a Driver", ObjectDirectoryInfo->Name));
@@ -354,7 +329,18 @@ Return Value:
         goto clean;
     }
 
+    //
+    // Force page-in the driver.
+    //
+
     KdPrint(("%wZ starts @ %p\n", ObjectDirectoryInfo->Name, DriverObject->DriverStart));
+    Status = LckForcePagingIn(DriverObject->DriverStart, DriverObject->DriverSize);
+
+    if (!NT_SUCCESS(Status))
+    {
+        KdPrint(("LckForcePagingIn failed with %08x\n", Status));
+        goto clean;
+    }
 
 clean:
     if (DriverObject != NULL)
