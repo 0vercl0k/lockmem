@@ -33,8 +33,25 @@ Return Value:
 
 {
     UNREFERENCED_PARAMETER(DriverObject);
+    PDEVICE_OBJECT DeviceObject = DriverObject->DeviceObject;
+    UNICODE_STRING NtWin32NameString = RTL_CONSTANT_STRING(LCK_DOS_DEVICE_NAME);
 
     PAGED_CODE();
+
+    //
+    // Delete the symlink.
+    //
+
+    IoDeleteSymbolicLink(&NtWin32NameString);
+
+    //
+    // Delete the device.
+    //
+
+    if (DeviceObject != NULL)
+    {
+        IoDeleteDevice(DeviceObject);
+    }
 }
 
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
@@ -414,6 +431,88 @@ clean:
     return Status;
 }
 
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_IRQL_requires_same_ NTSTATUS
+LckCreateClose(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
+
+/*++
+
+Routine Description:
+
+    This routine is called by the I/O system when the SIOCTL is opened or
+    closed.
+    No action is performed other than completing the request successfully.
+
+Arguments:
+
+    DeviceObject - a pointer to the object that represents the device
+    that I/O is to be done on.
+
+    Irp - a pointer to the I/O Request Packet for this request.
+
+Return Value:
+
+    NT status code
+--*/
+
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    PAGED_CODE();
+
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+_Function_class_(DRIVER_DISPATCH) _IRQL_requires_max_(PASSIVE_LEVEL)
+_IRQL_requires_same_ NTSTATUS
+LckDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
+
+/*++
+
+Routine Description:
+
+    Handles IOCTL requests coming from usermode.
+
+Arguments:
+
+    DeviceObject - Pointer to the device object.
+
+    Irp - Pointer to the Interrupt Request Packet.
+
+Return Value:
+
+    STATUS_SUCCESS if successful or STATUS_* otherwise.
+
+--*/
+
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG_PTR Information = 0;
+
+    PAGED_CODE();
+
+    LckDoWork();
+
+    //
+    // We are done with this IRP, so we fill in the IoStatus part.
+    //
+
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = Information;
+
+    //
+    // And time to complete the IRP!
+    //
+
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
+}
+
 _Function_class_(DRIVER_INITIALIZE) _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
 DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
@@ -443,6 +542,10 @@ Return Value:
 
 {
     UNREFERENCED_PARAMETER(RegistryPath);
+    UNICODE_STRING NtUnicodeString = RTL_CONSTANT_STRING(LCK_NT_DEVICE_NAME);
+    UNICODE_STRING NtWin32NameString = RTL_CONSTANT_STRING(LCK_DOS_DEVICE_NAME);
+    PDEVICE_OBJECT DeviceObject = NULL;
+    NTSTATUS Status = STATUS_SUCCESS;
 
     PAGED_CODE();
 
@@ -453,11 +556,42 @@ Return Value:
     ExInitializeDriverRuntime(DrvRtPoolNxOptIn);
 
     //
-    // Fill in the callbacks.
+    // Create a device.
+    //
+
+    Status = IoCreateDevice(
+        DriverObject, 0, &NtUnicodeString, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE, &DeviceObject);
+
+    if (!NT_SUCCESS(Status))
+    {
+        KdPrint(("IoCreateDevice failed with %08x\n", Status));
+        return Status;
+    }
+
+    //
+    // Create a symbolic link between our device name  and the Win32 name
+    //
+
+    Status = IoCreateSymbolicLink(&NtWin32NameString, &NtUnicodeString);
+
+    if (!NT_SUCCESS(Status))
+    {
+        //
+        // Delete everything that this routine has allocated.
+        //
+
+        KdPrint(("IoCreateSymbolicLink failed with %08x\n", Status));
+        IoDeleteDevice(DeviceObject);
+        return Status;
+    }
+
+    //
+    // Set-up the Unload / I/O callbacks.
     //
 
     DriverObject->DriverUnload = LckDriverUnload;
-
-    LckDoWork();
-    return STATUS_FAILED_DRIVER_ENTRY;
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = LckCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE] = LckCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = LckDispatchDeviceControl;
+    return STATUS_SUCCESS;
 }

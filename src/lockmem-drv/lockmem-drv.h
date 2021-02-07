@@ -2,6 +2,7 @@
 #define POOL_ZERO_DOWN_LEVEL_SUPPORT
 #include <ntifs.h>
 #include <ntintsafe.h>
+#include "..\common\common.h"
 
 #if defined(_M_ARM) || defined(_M_ARM64)
 #    error "ARM platforms are not supported."
@@ -200,6 +201,14 @@ _Function_class_(DRIVER_UNLOAD) _IRQL_requires_(PASSIVE_LEVEL)
 _IRQL_requires_same_ VOID
 LckDriverUnload(_In_ PDRIVER_OBJECT);
 
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_IRQL_requires_same_ NTSTATUS
+LckCreateClose(_In_ PDEVICE_OBJECT, _Inout_ PIRP);
+
+_Function_class_(DRIVER_DISPATCH) _IRQL_requires_max_(PASSIVE_LEVEL)
+_IRQL_requires_same_ NTSTATUS
+LckDispatchDeviceControl(_In_ PDEVICE_OBJECT, _Inout_ PIRP);
+
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
 LckDoWork();
@@ -229,10 +238,23 @@ LckWalkDirectoryEntries(_In_ HANDLE, _In_ DIRECTORY_CALLBACK, _Inout_opt_ PVOID)
 #ifdef ALLOC_PRAGMA
 #    pragma alloc_text(INIT, DriverEntry)
 #    pragma alloc_text(PAGE, LckDriverUnload)
+#    pragma alloc_text(PAGE, LckCreateClose)
+#    pragma alloc_text(PAGE, LckDispatchDeviceControl)
 #    pragma alloc_text(PAGE, LckDoWork)
 #    pragma alloc_text(PAGE, LckForcePagingIn)
 #    pragma alloc_text(PAGE, LckHandleEntry)
 #    pragma alloc_text(PAGE, LckWalkDirectoryEntries)
 #endif
 
+//
+// LCK tag.
+//
+
 #define LCK_TAG ' kcL'
+
+//
+// Device and symbolic link name.
+//
+
+#define LCK_NT_DEVICE_NAME L"\\Device\\" LCK_DEVICE_NAME
+#define LCK_DOS_DEVICE_NAME L"\\DosDevices\\" LCK_DEVICE_NAME

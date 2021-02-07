@@ -6,6 +6,7 @@
 #include <memory>
 #include <tlhelp32.h>
 #include "install.h"
+#include "..\common\common.h"
 
 #pragma comment(lib, "ntdll.lib")
 
@@ -23,6 +24,11 @@ const uint64_t _1MB = 1024 * 1024;
 #else
 #    define DebugPrint(_fmt_, ...) /* nuthin' */
 #endif
+
+const char *ServiceName = "lockmem";
+const char *ServiceDisplayName = "Lockmem driver";
+const char *ServiceFilename = "lockmem-drv.sys";
+const char *DeviceName = R"(\\.\)" LCK_DEVICE_NAME;
 
 extern "C" NTSYSCALLAPI NTSTATUS NTAPI
 NtLockVirtualMemory(
@@ -173,7 +179,7 @@ main(int Argc, const char *Argv[])
         DebugPrint("Locked %p (%lld MB) in memory..\r", BaseAddress, RegionSize / _1MB);
 
         auto Buffer = std::make_unique<uint8_t[]>(RegionSize);
-        size_t NumberBytesRead = 0;
+        SIZE_T NumberBytesRead = 0;
         const bool Ret = ReadProcessMemory(Process, BaseAddress, Buffer.get(), RegionSize, &NumberBytesRead);
         if (!Ret || NumberBytesRead != RegionSize)
         {
@@ -197,25 +203,62 @@ main(int Argc, const char *Argv[])
     // Start by cleaning up if it hasn't properly been removed.
     //
 
-    const char *DriverName = "lockmem-drv";
-    if (StopDriver(DriverName))
+    if (StopDriver(ServiceName))
     {
-        RemoveDriver(DriverName);
+        RemoveDriver(ServiceName);
     }
 
     //
     // Install the driver.
     //
 
-    if (!InstallDriver(DriverName, "Lockmem driver", "lockmem-drv.sys"))
+    if (!InstallDriver(ServiceName, ServiceDisplayName, ServiceFilename))
     {
         printf("InstallDriver failed, run as admin?\n");
         return EXIT_FAILURE;
     }
 
     printf("Driver installed\n");
-    StartDriver(DriverName);
-    RemoveDriver(DriverName);
+
+    //
+    // Force the current thread to be a GUI thread. This allows us to read into
+    // the session-space (to be able to read win32k*.sys PE headers etc.).
+    //
+
+    const HANDLE User32 = LoadLibraryA("user32.dll");
+
+    if (!StartDriver(ServiceName))
+    {
+        printf("StartDriver failed\n");
+        return EXIT_FAILURE;
+    }
+
+    //
+    // Get a handle to the device.
+    //
+
+    HANDLE Device = CreateFileA(
+        DeviceName, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    if (Device == nullptr)
+    {
+        printf("Could not open the lck device.\n");
+        return EXIT_FAILURE;
+    }
+
+    //
+    // Initialize the offsets that the driver needs.
+    //
+
+    DWORD BytesReturned;
+    if (!DeviceIoControl(Device, 0, nullptr, 0, nullptr, 0, &BytesReturned, nullptr))
+    {
+        printf("DeviceIoControl failed\n");
+        return EXIT_FAILURE;
+    }
+
+    StopDriver(ServiceName);
+    RemoveDriver(ServiceName);
     printf("Done with kernel\n");
     return EXIT_SUCCESS;
 }
