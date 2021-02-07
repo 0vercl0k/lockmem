@@ -219,7 +219,7 @@ Return Value:
 
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
-LckForcePagingIn(_In_ PVOID ImageBase, _In_ ULONG ImageSize)
+LckForcePagingIn(_In_ PVOID ImageBase, _In_ ULONG ImageSize, _Inout_opt_ PVOID Context)
 
 /*++
 
@@ -232,6 +232,8 @@ Arguments:
     ImageBase - Base address of the driver.
 
     ImageSize - Size of the driver.
+
+    Context - A context that user can provide.
 
 Return Value:
 
@@ -264,7 +266,9 @@ Return Value:
 
     for (ULONG Idx = 0; Idx < NtHeaders->FileHeader.NumberOfSections; Idx++)
     {
-        KdPrint(("  Section %x - %x\n", Idx, SectionHeaders[Idx].VirtualAddress));
+        PIMAGE_SECTION_HEADER Section = &SectionHeaders[Idx];
+        KdPrint(("  Section %x - %x\n", Idx, Section.VirtualAddress));
+        if (Sec)
     }
 
     return Status;
@@ -351,7 +355,7 @@ Return Value:
     //
 
     KdPrint(("%wZ starts @ %p\n", ObjectDirectoryInfo->Name, DriverObject->DriverStart));
-    Status = LckForcePagingIn(DriverObject->DriverStart, DriverObject->DriverSize);
+    Status = LckForcePagingIn(DriverObject->DriverStart, DriverObject->DriverSize, Context);
 
     if (!NT_SUCCESS(Status))
     {

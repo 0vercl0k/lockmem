@@ -215,7 +215,7 @@ LckDoWork();
 
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
-LckForcePagingIn(_In_ PVOID, _In_ ULONG);
+LckForcePagingIn(_In_ PVOID, _In_ ULONG, _Inout_opt_ PVOID);
 
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
