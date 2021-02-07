@@ -17,6 +17,10 @@
 #    error "ARM platforms are not supported."
 #endif
 
+//
+// Undocumented?
+//
+
 extern NTSTATUS
 ZwQueryDirectoryObject(
     _In_ HANDLE DirectoryHandle,
@@ -26,6 +30,18 @@ ZwQueryDirectoryObject(
     _In_ BOOLEAN RestartScan,
     _Inout_ PULONG Context,
     _Out_opt_ PULONG ReturnLength);
+
+extern NTSTATUS
+ObOpenObjectByName(
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_opt_ POBJECT_TYPE ObjectType,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _Inout_opt_ PACCESS_STATE AccessState,
+    _In_opt_ ACCESS_MASK DesiredAccess,
+    _Inout_opt_ PVOID ParseContext,
+    _Out_ PHANDLE Handle);
+
+extern POBJECT_TYPE *IoDriverObjectType;
 
 typedef struct _OBJECT_DIRECTORY_INFORMATION
 {
@@ -51,13 +67,13 @@ LckDoWork();
 
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
-LckHandleEntry(_In_ POBJECT_DIRECTORY_INFORMATION, _Maybenull_ _Inout_ PVOID);
+LckHandleEntry(_In_ HANDLE, _In_ POBJECT_DIRECTORY_INFORMATION, _Inout_opt_ PVOID);
 
-typedef NTSTATUS (*DIRECTORY_CALLBACK)(_In_ POBJECT_DIRECTORY_INFORMATION, _Maybenull_ _Inout_ PVOID);
+typedef NTSTATUS (*DIRECTORY_CALLBACK)(_In_ HANDLE, _In_ POBJECT_DIRECTORY_INFORMATION, _Inout_opt_ PVOID);
 
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
-LckWalkDirectoryEntries(_In_ HANDLE, _In_ DIRECTORY_CALLBACK, _Maybenull_ _Inout_ PVOID);
+LckWalkDirectoryEntries(_In_ HANDLE, _In_ DIRECTORY_CALLBACK, _Inout_opt_ PVOID);
 
 //
 // Our code doesn't need to be allocated in non-paged memory.
@@ -105,10 +121,7 @@ Return Value:
 
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
-LckWalkDirectoryEntries(
-    _In_ HANDLE DirectoryHandle,
-    _In_ DIRECTORY_CALLBACK Callback,
-    _Maybenull_ _Inout_ PVOID Context)
+LckWalkDirectoryEntries(_In_ HANDLE DirectoryHandle, _In_ DIRECTORY_CALLBACK Callback, _Inout_opt_ PVOID Context)
 
 /*++
 
@@ -241,7 +254,7 @@ Return Value:
         POBJECT_DIRECTORY_INFORMATION Entry = ObjectDirectoryInformation;
         while (Entry->Name.Length > 0)
         {
-            Status = Callback(Entry, Context);
+            Status = Callback(DirectoryHandle, Entry, Context);
             if (!NT_SUCCESS(Status))
             {
                 KdPrint(("Callback failed with %08x\n", Status));
@@ -271,7 +284,10 @@ Return Value:
 
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
-LckHandleEntry(_In_ POBJECT_DIRECTORY_INFORMATION ObjectDirectoryInfo, _Maybenull_ _Inout_ PVOID Context)
+LckHandleEntry(
+    _In_ HANDLE DirectoryHandle,
+    _In_ POBJECT_DIRECTORY_INFORMATION ObjectDirectoryInfo,
+    _Inout_opt_ PVOID Context)
 
 /*++
 
@@ -281,7 +297,9 @@ Routine Description:
 
 Arguments:
 
-    Entry - Pointer to the current entry.
+    DirectoryHandle - Handle to the directory the entries are in.
+
+    ObjectDirectoryInfo - Information related to an entry in \Driver.
 
     Context - Context pointer.
 
@@ -293,10 +311,64 @@ Return Value:
 
 {
     UNREFERENCED_PARAMETER(Context);
+    const UNICODE_STRING Driver = RTL_CONSTANT_STRING(L"Driver");
+    NTSTATUS Status = STATUS_SUCCESS;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE DriverHandle = NULL;
+    PDRIVER_OBJECT DriverObject = NULL;
 
     PAGED_CODE();
 
+    InitializeObjectAttributes(
+        &ObjectAttributes, &ObjectDirectoryInfo->Name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, DirectoryHandle, NULL);
+
+    if (RtlCompareUnicodeString(&Driver, &ObjectDirectoryInfo->TypeName, FALSE) != 0)
+    {
+        KdPrint(("Skipping %wZ because it is not a Driver", ObjectDirectoryInfo->Name));
+        goto clean;
+    }
+
+    //
+    // Open the driver by name to get a handle.
+    //
+
     KdPrint(("Received %wZ\n", ObjectDirectoryInfo->Name));
+    Status = ObOpenObjectByName(&ObjectAttributes, *IoDriverObjectType, KernelMode, NULL, 0, NULL, &DriverHandle);
+
+    if (!NT_SUCCESS(Status))
+    {
+        KdPrint(("ObOpenObjectByName failed with %08x\n", Status));
+        goto clean;
+    }
+
+    //
+    // Get a pointer off the handle.
+    //
+
+    Status = ObReferenceObjectByHandleWithTag(
+        DriverHandle, 0, *IoDriverObjectType, KernelMode, LCK_TAG, &DriverObject, NULL);
+
+    if (!NT_SUCCESS(Status))
+    {
+        KdPrint(("ObReferenceObjectByHandleWithTag failed with %08x\n", Status));
+        goto clean;
+    }
+
+    KdPrint(("%wZ starts @ %p\n", ObjectDirectoryInfo->Name, DriverObject->DriverStart));
+
+clean:
+    if (DriverObject != NULL)
+    {
+        ObDereferenceObjectWithTag(DriverObject, LCK_TAG);
+        DriverObject = NULL;
+    }
+
+    if (DriverHandle != NULL)
+    {
+        ZwClose(DriverHandle);
+        DriverHandle = NULL;
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -324,7 +396,8 @@ Return Value:
     NTSTATUS Status = STATUS_SUCCESS;
     HANDLE DirectoryHandle = NULL;
     const UNICODE_STRING DirectoryName = RTL_CONSTANT_STRING(L"\\Driver");
-    OBJECT_ATTRIBUTES ObjectAttributes = RTL_CONSTANT_OBJECT_ATTRIBUTES(&DirectoryName, OBJ_KERNEL_HANDLE);
+    OBJECT_ATTRIBUTES ObjectAttributes =
+        RTL_CONSTANT_OBJECT_ATTRIBUTES(&DirectoryName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE);
 
     PAGED_CODE();
 
@@ -338,6 +411,10 @@ Return Value:
         KdPrint(("ZwOpenDirectoryObject failed with %08x\n", Status));
         goto clean;
     }
+
+    //
+    // Walk the directory and handle every entries in a custom callback.
+    //
 
     Status = LckWalkDirectoryEntries(DirectoryHandle, LckHandleEntry, NULL);
 
