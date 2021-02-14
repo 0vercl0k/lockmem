@@ -243,6 +243,7 @@ Return Value:
 
 {
     UNREFERENCED_PARAMETER(ImageSize);
+    UNREFERENCED_PARAMETER(Context);
     NTSTATUS Status = STATUS_SUCCESS;
     PIMAGE_DOS_HEADER DosHeader = NULL;
     PIMAGE_NT_HEADERS NtHeaders = NULL;
@@ -267,8 +268,48 @@ Return Value:
     for (ULONG Idx = 0; Idx < NtHeaders->FileHeader.NumberOfSections; Idx++)
     {
         PIMAGE_SECTION_HEADER Section = &SectionHeaders[Idx];
-        KdPrint(("  Section %x - %x\n", Idx, Section.VirtualAddress));
-        if (Sec)
+        KdPrint(("  Section %x - %x\n", Idx, Section->VirtualAddress));
+
+        //
+        // If the section is discardable, let's skip it.
+        //
+
+        if ((Section->Characteristics & IMAGE_SCN_MEM_DISCARDABLE) != 0)
+        {
+            continue;
+        }
+
+        //
+        // Wrap it up in an MDL.
+        //
+
+        PVOID Start = (PVOID)((PUCHAR)ImageBase + Section->VirtualAddress);
+        PMDL Mdl = IoAllocateMdl(Start, Section->Misc.VirtualSize, FALSE, FALSE, NULL);
+
+        if (Mdl == NULL)
+        {
+            KdPrint(("IoAllocateMdl failed\n"));
+            break;
+        }
+
+        //
+        // Lock the pages.
+        //
+
+        try
+        {
+            MmProbeAndLockPages(Mdl, KernelMode, IoReadAccess);
+        }
+        except(EXCEPTION_EXECUTE_HANDLER)
+        {
+            //
+            // If MmProbeAndLockPages, it means the pages are locked already, so skip over those.
+            //
+
+            KdPrint(("MmProbeAndLockPages threw an exception\n"));
+            IoFreeMdl(Mdl);
+            Mdl = NULL;
+        }
     }
 
     return Status;
@@ -573,7 +614,7 @@ Return Value:
     }
 
     //
-    // Create a symbolic link between our device name  and the Win32 name
+    // Create a symbolic link between our device name and the Win32 name.
     //
 
     Status = IoCreateSymbolicLink(&NtWin32NameString, &NtUnicodeString);

@@ -258,3 +258,5 @@ LckWalkDirectoryEntries(_In_ HANDLE, _In_ DIRECTORY_CALLBACK, _Inout_opt_ PVOID)
 
 #define LCK_NT_DEVICE_NAME L"\\Device\\" LCK_DEVICE_NAME
 #define LCK_DOS_DEVICE_NAME L"\\DosDevices\\" LCK_DEVICE_NAME
+
+#define IMAGE_SCN_MEM_DISCARDABLE 0x02000000

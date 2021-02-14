@@ -5,10 +5,13 @@
 #include "install.h"
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <memory>
 #include <tlhelp32.h>
 
 #pragma comment(lib, "ntdll.lib")
+
+namespace fs = std::filesystem;
 
 const uint64_t _1MB = 1024 * 1024;
 
@@ -190,6 +193,11 @@ int main(int Argc, const char *Argv[]) {
     RemoveDriver(ServiceName);
   }
 
+  if (!fs::exists(ServiceFilename)) {
+    printf("The driver %s does not exist, so exiting.", ServiceFilename);
+    return EXIT_FAILURE;
+  }
+
   //
   // Install the driver.
   //
@@ -237,8 +245,7 @@ int main(int Argc, const char *Argv[]) {
     return EXIT_FAILURE;
   }
 
-  StopDriver(ServiceName);
-  RemoveDriver(ServiceName);
+  CloseHandle(Device);
   printf("Done with kernel\n");
   return EXIT_SUCCESS;
 }
