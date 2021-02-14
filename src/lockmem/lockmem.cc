@@ -225,9 +225,9 @@ int main(int Argc, const char *Argv[]) {
   // Get a handle to the device.
   //
 
-  HANDLE Device =
-      CreateFileA(DeviceName, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  HANDLE Device = CreateFileA(DeviceName, GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
   if (Device == nullptr) {
     printf("Could not open the lck device.\n");
@@ -241,7 +241,7 @@ int main(int Argc, const char *Argv[]) {
   DWORD BytesReturned;
   if (!DeviceIoControl(Device, 0, nullptr, 0, nullptr, 0, &BytesReturned,
                        nullptr)) {
-    printf("DeviceIoControl failed\n");
+    printf("DeviceIoControl failed with GLE=%d\n", GetLastError());
     return EXIT_FAILURE;
   }
 

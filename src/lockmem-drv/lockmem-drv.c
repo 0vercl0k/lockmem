@@ -6,6 +6,20 @@
 // ed nt!Kd_DEFAULT_MASK ffffffff
 //
 
+typedef struct _LCK_NODE
+{
+    SINGLE_LIST_ENTRY Entry;
+    PMDL Mdl;
+} LCK_NODE, *PLCK_NODE;
+
+typedef struct _LCK_STATE
+{
+    LONG Synchronization;
+    SINGLE_LIST_ENTRY Mdls;
+} LCK_STATE, *PLCK_STATE;
+
+LCK_STATE gLckState;
+
 //
 // Endless source of inspiration:
 //   - ProcessHacker's source code.
@@ -35,6 +49,7 @@ Return Value:
     UNREFERENCED_PARAMETER(DriverObject);
     PDEVICE_OBJECT DeviceObject = DriverObject->DeviceObject;
     UNICODE_STRING NtWin32NameString = RTL_CONSTANT_STRING(LCK_DOS_DEVICE_NAME);
+    PLCK_NODE Node = NULL;
 
     PAGED_CODE();
 
@@ -51,6 +66,42 @@ Return Value:
     if (DeviceObject != NULL)
     {
         IoDeleteDevice(DeviceObject);
+    }
+
+    //
+    // Clean up the MDLs.
+    //
+
+    while (TRUE)
+    {
+        //
+        // Pop an entry off the list.
+        //
+
+        Node = (PLCK_NODE)PopEntryList(&gLckState.Mdls);
+        if (Node == NULL)
+        {
+            break;
+        }
+
+        //
+        // Unlock the pages.
+        //
+
+        MmUnlockPages(Node->Mdl);
+
+        //
+        // Free the MDL.
+        //
+
+        IoFreeMdl(Node->Mdl);
+
+        //
+        // Free the backing buffer.
+        //
+
+        ExFreePoolWithTag(Node, LCK_TAG);
+        Node = NULL;
     }
 }
 
@@ -248,6 +299,9 @@ Return Value:
     PIMAGE_DOS_HEADER DosHeader = NULL;
     PIMAGE_NT_HEADERS NtHeaders = NULL;
     PIMAGE_SECTION_HEADER SectionHeaders = NULL;
+    PLCK_STATE State = (PLCK_STATE)Context;
+    PLCK_NODE Node = NULL;
+    const CHAR InitKdbg[8] = {'I', 'N', 'I', 'T', 'K', 'D', 'B', 'G'};
 
     PAGED_CODE();
 
@@ -275,6 +329,18 @@ Return Value:
         //
 
         if ((Section->Characteristics & IMAGE_SCN_MEM_DISCARDABLE) != 0)
+        {
+            continue;
+        }
+
+        //
+        // If the section name is 'INITKDBG', let's skip it as well as this section
+        // gets removed from memory (related to patchguard).
+        //
+
+        NT_ASSERT(sizeof(Section->Name) == sizeof(InitKdbg));
+
+        if (memcmp(Section->Name, InitKdbg, sizeof(InitKdbg)) == 0)
         {
             continue;
         }
@@ -310,6 +376,32 @@ Return Value:
             IoFreeMdl(Mdl);
             Mdl = NULL;
         }
+
+        //
+        // Allocate a node to keep track of the MDL.
+        //
+
+        Node = ExAllocatePoolWithTag(PagedPool, sizeof(LCK_NODE), LCK_TAG);
+        if (Node == NULL)
+        {
+            MmUnlockPages(Mdl);
+            IoFreeMdl(Mdl);
+            Mdl = NULL;
+            continue;
+        }
+
+        //
+        // Initialize the node.
+        //
+
+        memset(Node, 0, sizeof(LCK_NODE));
+        Node->Mdl = Mdl;
+
+        //
+        // Push it into the global list.
+        //
+
+        PushEntryList(&State->Mdls, &Node->Entry);
     }
 
     return Status;
@@ -369,7 +461,6 @@ Return Value:
     // Open the driver by name to get a handle.
     //
 
-    KdPrint(("Received %wZ\n", ObjectDirectoryInfo->Name));
     Status = ObOpenObjectByName(&ObjectAttributes, *IoDriverObjectType, KernelMode, NULL, 0, NULL, &DriverHandle);
 
     if (!NT_SUCCESS(Status))
@@ -464,7 +555,7 @@ Return Value:
     // Walk the directory and handle every entries in a custom callback.
     //
 
-    Status = LckWalkDirectoryEntries(DirectoryHandle, LckHandleEntry, NULL);
+    Status = LckWalkDirectoryEntries(DirectoryHandle, LckHandleEntry, &gLckState);
 
 clean:
     if (DirectoryHandle != NULL)
@@ -536,12 +627,16 @@ Return Value:
 
 {
     UNREFERENCED_PARAMETER(DeviceObject);
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     ULONG_PTR Information = 0;
 
     PAGED_CODE();
 
-    LckDoWork();
+    if (InterlockedCompareExchange(&gLckState.Synchronization, 1, 1) == 0)
+    {
+        Status = LckDoWork();
+        gLckState.Synchronization = 0;
+    }
 
     //
     // We are done with this IRP, so we fill in the IoStatus part.
@@ -638,5 +733,11 @@ Return Value:
     DriverObject->MajorFunction[IRP_MJ_CREATE] = LckCreateClose;
     DriverObject->MajorFunction[IRP_MJ_CLOSE] = LckCreateClose;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = LckDispatchDeviceControl;
+
+    //
+    // Initialize state.
+    //
+
+    memset(&gLckState, 0, sizeof(gLckState));
     return STATUS_SUCCESS;
 }
