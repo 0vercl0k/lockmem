@@ -211,7 +211,7 @@ LckDispatchDeviceControl(_In_ PDEVICE_OBJECT, _Inout_ PIRP);
 
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
-LckDoWork();
+LckForcePagingInDrivers();
 
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
@@ -240,17 +240,19 @@ LckWalkDirectoryEntries(_In_ HANDLE, _In_ DIRECTORY_CALLBACK, _Inout_opt_ PVOID)
 #    pragma alloc_text(PAGE, LckDriverUnload)
 #    pragma alloc_text(PAGE, LckCreateClose)
 #    pragma alloc_text(PAGE, LckDispatchDeviceControl)
-#    pragma alloc_text(PAGE, LckDoWork)
+#    pragma alloc_text(PAGE, LckForcePagingInDrivers)
 #    pragma alloc_text(PAGE, LckForcePagingIn)
 #    pragma alloc_text(PAGE, LckHandleEntry)
 #    pragma alloc_text(PAGE, LckWalkDirectoryEntries)
 #endif
 
 //
-// LCK tag.
+// LCK pool tags.
 //
 
-#define LCK_TAG ' kcL'
+#define LCK_TAG ' Lck'
+#define LCK_TAG_NODE 'NkcL'
+#define LCK_TAG_ODI 'OkcL'
 
 //
 // Device and symbolic link name.

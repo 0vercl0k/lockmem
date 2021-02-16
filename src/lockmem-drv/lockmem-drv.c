@@ -100,7 +100,7 @@ Return Value:
         // Free the backing buffer.
         //
 
-        ExFreePoolWithTag(Node, LCK_TAG);
+        ExFreePoolWithTag(Node, LCK_TAG_NODE);
         Node = NULL;
     }
 }
@@ -211,7 +211,7 @@ Return Value:
 
             if (ObjectDirectoryInformation != NULL)
             {
-                ExFreePoolWithTag(ObjectDirectoryInformation, LCK_TAG);
+                ExFreePoolWithTag(ObjectDirectoryInformation, LCK_TAG_ODI);
             }
 
             //
@@ -219,7 +219,7 @@ Return Value:
             //
 
             Length *= 2;
-            ObjectDirectoryInformation = ExAllocatePoolWithTag(PagedPool, Length, LCK_TAG);
+            ObjectDirectoryInformation = ExAllocatePoolWithTag(PagedPool, Length, LCK_TAG_ODI);
             if (ObjectDirectoryInformation == NULL)
             {
                 KdPrint(("ExAllocatePoolWithTag failed for enumeration\n"));
@@ -261,7 +261,7 @@ Return Value:
 
     if (ObjectDirectoryInformation != NULL)
     {
-        ExFreePoolWithTag(ObjectDirectoryInformation, LCK_TAG);
+        ExFreePoolWithTag(ObjectDirectoryInformation, LCK_TAG_ODI);
         ObjectDirectoryInformation = NULL;
     }
 
@@ -381,7 +381,7 @@ Return Value:
         // Allocate a node to keep track of the MDL.
         //
 
-        Node = ExAllocatePoolWithTag(PagedPool, sizeof(LCK_NODE), LCK_TAG);
+        Node = ExAllocatePoolWithTag(PagedPool, sizeof(LCK_NODE), LCK_TAG_NODE);
         if (Node == NULL)
         {
             MmUnlockPages(Mdl);
@@ -513,7 +513,7 @@ clean:
 
 _IRQL_requires_same_ _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
-LckDoWork()
+LckForcePagingInDrivers()
 
 /*++
 
@@ -632,9 +632,13 @@ Return Value:
 
     PAGED_CODE();
 
+    //
+    // Ensure that there is only one client at the same time.
+    //
+
     if (InterlockedCompareExchange(&gLckState.Synchronization, 0, 1) == 0)
     {
-        Status = LckDoWork();
+        Status = LckForcePagingInDrivers();
         gLckState.Synchronization = 0;
     }
 
