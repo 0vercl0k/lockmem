@@ -632,7 +632,7 @@ Return Value:
 
     PAGED_CODE();
 
-    if (InterlockedCompareExchange(&gLckState.Synchronization, 1, 1) == 0)
+    if (InterlockedCompareExchange(&gLckState.Synchronization, 0, 1) == 0)
     {
         Status = LckDoWork();
         gLckState.Synchronization = 0;
