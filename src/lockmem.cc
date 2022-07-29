@@ -115,6 +115,7 @@ int main(int Argc, const char *Argv[]) {
                   false, ProcessId);
 
   if (Process == nullptr) {
+    printf("Failed to OpenProcess(%s) (gle=%d), exiting.\n", GetLastError());
     return EXIT_FAILURE;
   }
 
@@ -154,7 +155,7 @@ int main(int Argc, const char *Argv[]) {
     const bool Ret = ReadProcessMemory(Process, BaseAddress, Buffer.get(),
                                        RegionSize, &NumberBytesRead);
     if (!Ret || NumberBytesRead != RegionSize) {
-      printf("Failed to ReadProcessMemory the region, exiting.\n");
+      printf("Failed to ReadProcessMemory the region (gle=%d), exiting.\n", GetLastError());
       return EXIT_FAILURE;
     }
 
