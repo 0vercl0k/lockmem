@@ -115,7 +115,7 @@ int main(int Argc, const char *Argv[]) {
                   false, ProcessId);
 
   if (Process == nullptr) {
-    printf("Failed to OpenProcess(%s) (gle=%d), exiting.\n", GetLastError());
+    printf("Failed to OpenProcess(%s) (gle=%d), exiting.\n", Argv[1], GetLastError());
     return EXIT_FAILURE;
   }
 
