@@ -6,18 +6,26 @@ jobs:
   Windows:
     name: Windows latest
     runs-on: windows-latest 
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ['x86', 'x64']
+        configuration: ['Debug', 'Release']
+
     steps:
     - name: Checkout
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
 
     - name: Setup vs prompt
       uses: ilammy/msvc-dev-cmd@v1
 
     - name: Build
-      run: nmake
+      run: msbuild /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} src\lockmem.sln
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       with:
-        name: bin
-        path: bin
+        name: bin-${{ matrix.platform }}.${{matrix.configuration }}
+        path: |
+          src/**/${{ matrix.configuration }}/lockmem.exe
+          src/**/${{ matrix.configuration }}/lockmem.pdb
