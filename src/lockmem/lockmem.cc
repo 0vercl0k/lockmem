@@ -3,23 +3,22 @@
 
 #include <assert.h>
 #include <boost/icl/interval_set.hpp>
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
-#include <inttypes.h>
+#include <fmt/core.h>
 #include <memory>
 #include <optional>
-#include <string.h>
 #include <string>
 #include <tlhelp32.h>
 #include <unordered_map>
-#include <vector>
 
 #pragma comment(lib, "ntdll.lib")
 
 #ifdef NDEBUG
 #define dbgprintf(...) /**/
 #else
-#define dbgprintf(...) printf(__VA_ARGS__)
+#define dbgprintf(...) fmt::print(__VA_ARGS__)
 #endif
 
 enum class THREADINFOCLASS : uint32_t { ThreadBasicInformation };
@@ -34,13 +33,29 @@ extern "C" NTSYSCALLAPI NTSTATUS NTAPI NtLockVirtualMemory(HANDLE ProcessHandle,
                                                            PSIZE_T RegionSize,
                                                            ULONG MapType);
 
-using Interval_t = boost::icl::interval<uint64_t>;
+using Interval_t = boost::icl::discrete_interval<uint64_t>;
 using Ranges_t = boost::icl::interval_set<uint64_t>;
 
-const uint64_t _1MB = 1'024 * 1'024;
-const NTSTATUS STATUS_WORKING_SET_QUOTA = 0xc000'00a1;
-const ULONG MAP_PROCESS = 1;
-const ULONG MAP_SYSTEM = 2;
+struct BytesHuman_t {
+  double Value;
+  const char *Unit;
+};
+
+template <> struct fmt::formatter<BytesHuman_t> : fmt::formatter<std::string> {
+  template <typename FormatContext>
+  auto format(const BytesHuman_t &Bytes, FormatContext &Ctx) const {
+    return fmt::format_to(Ctx.out(), "{:.1f}{}", Bytes.Value, Bytes.Unit);
+  }
+};
+
+template <> struct fmt::formatter<Interval_t> : fmt::formatter<std::string> {
+  template <typename FormatContext>
+  auto format(const Interval_t &I, FormatContext &Ctx) const {
+    return fmt::format_to(Ctx.out(), "{}{:x}, {:x}{}",
+                          boost::icl::left_bracket(I), I.lower(), I.upper(),
+                          boost::icl::right_bracket(I));
+  }
+};
 
 template <typename F_t> [[nodiscard]] auto finally(F_t &&f) noexcept {
   struct Finally_t {
@@ -58,6 +73,30 @@ template <typename F_t> [[nodiscard]] auto finally(F_t &&f) noexcept {
 }
 
 [[nodiscard]] bool NT_SUCCESS(const NTSTATUS Status) { return Status >= 0; }
+
+//
+// Utility that is used to print bytes for human.
+//
+
+[[nodiscard]] BytesHuman_t BytesToHuman(const uint64_t Bytes_) {
+  const char *Unit = "b";
+  double Bytes = double(Bytes_);
+  const uint64_t K = 1'024;
+  const uint64_t M = K * K;
+  const uint64_t G = M * K;
+  if (Bytes >= G) {
+    Unit = "gb";
+    Bytes /= G;
+  } else if (Bytes >= M) {
+    Unit = "mb";
+    Bytes /= M;
+  } else if (Bytes >= K) {
+    Unit = "kb";
+    Bytes /= K;
+  }
+
+  return {Bytes, Unit};
+}
 
 std::optional<Ranges_t> ParseRanges(std::string String) {
   Ranges_t Ranges;
@@ -86,13 +125,13 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
     const int HowMany =
         sscanf_s(Token, "%" PRIx64 "%c%" PRIx64, &Start, &Mode, 1, &End);
     if (HowMany != 3) {
-      printf("The range %s is malformed, exiting\n", Token);
+      fmt::print("The range %s is malformed, bailing\n", Token);
       return {};
     }
 
     const auto CorrectMode = Mode == '-' || Mode == '+';
     if (!CorrectMode) {
-      printf("The range %s uses an unknown mode, exiting\n", Token);
+      fmt::print("The range %s uses an unknown mode, bailing\n", Token);
       return {};
     }
 
@@ -101,8 +140,7 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
     //
 
     if (Mode == '+') {
-      End += Start + ((End > 1) ? -1 : 0);
-      printf("%" PRIx64 ", %" PRIx64 "\n", Start, End);
+      End += Start;
     }
 
     //
@@ -110,7 +148,7 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
     //
 
     if (Start >= End) {
-      printf("The range %s is malformed, exiting\n", Token);
+      fmt::print("The range {} is malformed, bailing\n", Token);
       return {};
     }
 
@@ -119,8 +157,7 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
     //
 
     if ((Start & 0xf'ff) != 0) {
-      printf("The range start %" PRIx64 " is not page aligned, exiting\n",
-             Start);
+      fmt::print("The range start {:x} is not page aligned, bailing\n", Start);
       return {};
     }
 
@@ -128,9 +165,9 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
     // Check that the range is page aligned.
     //
 
-    const uint64_t Size = End - Start + 1;
+    const uint64_t Size = End - Start;
     if ((Size & 0xf'ff) != 0) {
-      printf("The range size %" PRIx64 " is not page aligned, exiting\n", Size);
+      fmt::print("The range size {:x} is not page aligned, bailing\n", Size);
       return {};
     }
 
@@ -138,7 +175,7 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
     // All right, we have a range!
     //
 
-    Ranges.insert(Interval_t::closed(Start, End));
+    Ranges.insert(Interval_t::right_open(Start, End));
   }
 
   return Ranges;
@@ -146,8 +183,10 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
 
 [[nodiscard]] bool GrownAndLockInWorkingSet(const HANDLE Process,
                                             const auto &Range) {
+  const NTSTATUS STATUS_WORKING_SET_QUOTA = 0xc000'00a1;
+  const uint32_t MAP_PROCESS = 1;
   auto BaseAddress = PVOID(Range.lower());
-  auto RegionSize = boost::icl::size(Range);
+  SIZE_T RegionSize = boost::icl::size(Range);
   for (size_t Tries = 0; Tries < 10; Tries++) {
     const NTSTATUS Status =
         NtLockVirtualMemory(Process, &BaseAddress, &RegionSize, MAP_PROCESS);
@@ -157,7 +196,8 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
     }
 
     if (Status != STATUS_WORKING_SET_QUOTA) {
-      printf("NtLockVirtualMemory failed w/ %x for %p\n", Status, BaseAddress);
+      fmt::print("NtLockVirtualMemory failed w/ {} for {}, bailing\n", Status,
+                 BaseAddress);
       return false;
     }
 
@@ -167,25 +207,28 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
 
     if (!GetProcessWorkingSetSizeEx(Process, &MinimumWorkingSetSize,
                                     &MaximumWorkingSetSize, &Flags)) {
-      printf("GetProcessWorkingSetSizeEx failed, GLE=%lu.\n", GetLastError());
+      fmt::print("GetProcessWorkingSetSizeEx failed w/ GLE={}, bailing\n",
+                 GetLastError());
       return false;
     }
 
     MaximumWorkingSetSize *= 2;
     MinimumWorkingSetSize *= 2;
 
-    printf("Growing working set to %lld MB..\r", MinimumWorkingSetSize / _1MB);
+    fmt::print("Growing working set to {}..\r",
+               BytesToHuman(MinimumWorkingSetSize));
 
     Flags = QUOTA_LIMITS_HARDWS_MIN_ENABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE;
 
     if (!SetProcessWorkingSetSizeEx(Process, MinimumWorkingSetSize,
                                     MaximumWorkingSetSize, Flags)) {
-      printf("SetProcessWorkingSetSizeEx failed, GLE=%lu.\n", GetLastError());
+      fmt::print("SetProcessWorkingSetSizeEx failed w/ GLE={}, bailing\n",
+                 GetLastError());
       return false;
     }
   }
 
-  printf("Ran out of tries to grow the working set.\n");
+  fmt::print("Ran out of tries to grow the working set\n");
   return false;
 }
 
@@ -211,8 +254,8 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
     }
 
     if (Pid) {
-      printf("There are several instances of %s, pid %d will be used.\n",
-             Pe32.szExeFile, *Pid);
+      fmt::print("There are several instances of {}, pid {} will be used\n",
+                 Pe32.szExeFile, *Pid);
     } else {
       Pid = Pe32.th32ProcessID;
     }
@@ -226,6 +269,7 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
   SIZE_T AmountRead = 0;
   if (!ReadProcessMemory(Process, (void *)RemoteAddress, Buffer, BufferLength,
                          &AmountRead)) {
+    fmt::print("ReadProcessMemory failed w/ GLE={}, bailing\n", GetLastError());
     return false;
   }
 
@@ -247,7 +291,7 @@ template <typename Struct_t>
 
   const HANDLE Thread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, Tid);
   if (Thread == nullptr) {
-    printf("OpenThread failed w/ GLE=%d\n", GetLastError());
+    fmt::print("OpenThread failed w/ GLE={}, bailing\n", GetLastError());
     return {};
   }
 
@@ -274,7 +318,7 @@ template <typename Struct_t>
       Thread, THREADINFOCLASS::ThreadBasicInformation, &ThreadInformation,
       sizeof(ThreadInformation), &Length);
   if (Status != 0 || Length != sizeof(ThreadInformation)) {
-    printf("NtQueryInformationThread failed w/ %x\n", Status);
+    fmt::print("NtQueryInformationThread failed w/ {}, bailing\n", Status);
     return {};
   }
 
@@ -296,7 +340,7 @@ template <typename Struct_t>
   } Tib = {};
 
   if (!VirtRead(ThreadInformation.TebBaseAddress, Tib, Process)) {
-    printf("VirtRead failed, bailing\n");
+    fmt::print("VirtRead failed, bailing\n");
     return {};
   }
 
@@ -314,13 +358,13 @@ template <typename Struct_t>
 #ifdef _WIN64
   uint16_t ProcessMachine = 0, NativeMachine = 0;
   if (!IsWow64Process2(Process, &ProcessMachine, &NativeMachine)) {
-    printf("IsWow64Process2 failed w/ GLE=%d, bailing\n", GetLastError());
+    fmt::print("IsWow64Process2 failed w/ GLE={}, bailing\n", GetLastError());
     return {};
   }
 
   if (NativeMachine != IMAGE_FILE_MACHINE_AMD64) {
-    printf("NativeMachine has an unexpected value (%x), bailing\n",
-           NativeMachine);
+    fmt::print("NativeMachine has an unexpected value {:x}, bailing\n",
+               NativeMachine);
     return {};
   }
 
@@ -329,7 +373,7 @@ template <typename Struct_t>
   }
 
   if (!VirtRead(Tib._64.ExceptionList, Tib, Process)) {
-    printf("VirtRead2 failed, bailing\n");
+    fmt::print("VirtRead failed, bailing\n");
     return {};
   }
 
@@ -346,7 +390,8 @@ template <typename Struct_t>
   Ranges_t Stacks;
   HANDLE Snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
   if (Snapshot == INVALID_HANDLE_VALUE) {
-    printf("CreateToolhelp32Snapshot failed w/ GLE=%d\n", GetLastError());
+    fmt::print("CreateToolhelp32Snapshot failed w/ GLE={}, bailing\n",
+               GetLastError());
     return {};
   }
 
@@ -355,7 +400,7 @@ template <typename Struct_t>
   THREADENTRY32 Entry = {};
   Entry.dwSize = sizeof(Entry);
   if (!Thread32First(Snapshot, &Entry)) {
-    printf("Thread32First failed w/ GLE=%d\n", GetLastError());
+    fmt::print("Thread32First failed w/ GLE={}, bailing\n", GetLastError());
     return {};
   }
 
@@ -375,13 +420,13 @@ template <typename Struct_t>
 
     const auto &Ranges = GetStackRange(Process, Entry.th32ThreadID);
     if (!Ranges) {
-      printf("GetStackRange failed for TID=%x, bailing\n", Entry.th32ThreadID);
+      fmt::print("GetStackRange failed for TID {}, bailing\n",
+                 Entry.th32ThreadID);
       return {};
     }
 
     for (const auto &Range : *Ranges) {
-      printf("TID %lu Stack Range: %" PRIx64 "-%" PRIx64 "\n",
-             Entry.th32ThreadID, Range.lower(), Range.upper());
+      fmt::print("TID {} Stack Range: {}\n", Entry.th32ThreadID, Range);
       Stacks.insert(Range);
     }
   } while (Thread32Next(Snapshot, &Entry));
@@ -407,13 +452,13 @@ int main(int Argc, const char *Argv[]) {
     const char *Next = (Idx + 1) < Argc ? Argv[Idx + 1] : nullptr;
     if (Arg == "--ranges") {
       if (!Next) {
-        printf("--ranges expect to be followed by an argument.\n");
+        fmt::print("--ranges expect to be followed by an argument\n");
         return EXIT_FAILURE;
       }
 
       Opts.Ranges = ParseRanges(Next);
       if (!Opts.Ranges) {
-        printf("ParseRanges failed, exiting.\n");
+        fmt::print("ParseRanges failed, exiting\n");
         return EXIT_FAILURE;
       }
       Idx++;
@@ -429,8 +474,9 @@ int main(int Argc, const char *Argv[]) {
   //
 
   if (!Opts.NameOrPid) {
-    printf("./lockmem [--ranges 0-0x1000,0x2000+0x1000,..] [--stacks] <process "
-           "name | pid>\n");
+    fmt::print(
+        "./lockmem [--ranges 0-0x1000,0x2000+0x1000,..] [--stacks] <process "
+        "name | pid>\n");
     return EXIT_FAILURE;
   }
 
@@ -445,7 +491,7 @@ int main(int Argc, const char *Argv[]) {
   if (!Valid) {
     const auto &Pid = Name2Pid(*Opts.NameOrPid);
     if (!Pid) {
-      printf("Name2Pid failed, exiting.\n");
+      fmt::print("Name2Pid failed, exiting\n");
       return EXIT_FAILURE;
     }
     ProcessId = *Pid;
@@ -461,8 +507,8 @@ int main(int Argc, const char *Argv[]) {
                   false, ProcessId);
 
   if (!Process) {
-    printf("OpenProcess(%s) failed w/ GLE=%d, exiting.\n", Argv[1],
-           GetLastError());
+    fmt::print("OpenProcess {} failed w/ GLE={}, exiting\n", Argv[1],
+               GetLastError());
     return EXIT_FAILURE;
   }
 
@@ -476,7 +522,7 @@ int main(int Argc, const char *Argv[]) {
   if (Opts.Stacks) {
     AllowRanges = GetStackRanges(Process, ProcessId);
     if (!AllowRanges) {
-      printf("GetStacks failed, exiting\n");
+      fmt::print("GetStacks failed, exiting\n");
       return EXIT_FAILURE;
     }
   }
@@ -497,10 +543,9 @@ int main(int Argc, const char *Argv[]) {
   // Iterate through memory ranges of the process.
   //
 
-  printf("Got a handle to PID %d\n", ProcessId);
+  fmt::print("Got a handle on PID {}\n", ProcessId);
   MEMORY_BASIC_INFORMATION MemoryInfo;
-  uint64_t NumberBytes = 0;
-  uint64_t AmountMb = 0;
+  uint64_t LockedAmount = 0;
   for (uint8_t *Address = nullptr;
        VirtualQueryEx(Process, Address, &MemoryInfo, sizeof(MemoryInfo));
        Address = (uint8_t *)MemoryInfo.BaseAddress + MemoryInfo.RegionSize) {
@@ -511,10 +556,11 @@ int main(int Argc, const char *Argv[]) {
 
     const auto BaseAddress = MemoryInfo.BaseAddress;
     const auto RegionSize = MemoryInfo.RegionSize;
+    const auto &RegionRange = Interval_t::right_open(
+        uint64_t(BaseAddress), uint64_t(BaseAddress) + RegionSize);
     const uint32_t BadProtectBits = PAGE_GUARD | PAGE_NOACCESS;
     if (MemoryInfo.Protect & BadProtectBits) {
-      dbgprintf("Skipping %p - %zx because of protect bad bits..\n",
-                BaseAddress, RegionSize);
+      dbgprintf("Skipping {} because of protect bad bits..\n", RegionRange);
       continue;
     }
 
@@ -524,8 +570,7 @@ int main(int Argc, const char *Argv[]) {
 
     const uint32_t BadStatetBits = MEM_FREE | MEM_RESERVE;
     if (MemoryInfo.State & BadStatetBits) {
-      dbgprintf("Skipping %p - %zx because of state bad bits..\n", BaseAddress,
-                RegionSize);
+      dbgprintf("Skipping {} because of state bad bits..\n", RegionRange);
       continue;
     }
 
@@ -533,8 +578,6 @@ int main(int Argc, const char *Argv[]) {
     // Check if the region overlaps with a filter.
     //
 
-    const auto &RegionRange = Interval_t::right_open(
-        uint64_t(BaseAddress), uint64_t(BaseAddress) + RegionSize);
     Ranges_t OverlappingRanges;
     OverlappingRanges.insert(RegionRange);
     if (AllowRanges) {
@@ -548,14 +591,13 @@ int main(int Argc, const char *Argv[]) {
       //
 
       if (!GrownAndLockInWorkingSet(Process, OverlappingRange)) {
-        printf("GrownAndLockInWorkingSet failed, exiting.\n");
+        fmt::print("GrownAndLockInWorkingSet failed, bailing\n");
         return EXIT_FAILURE;
       }
 
-      const auto OverlappingStart = PVOID(OverlappingRange.lower());
-      const auto OverlappingSize = boost::icl::size(OverlappingRange);
-      dbgprintf("Locked %p (%lld MB) in memory..\r", OverlappingStart,
-                OverlappingSize / _1MB);
+      LockedAmount += boost::icl::size(OverlappingRange);
+      fmt::print("Locked {}..\r", BytesToHuman(LockedAmount));
+
 #if 0
       auto Buffer = std::make_unique<uint8_t[]>(OverlappingSize);
       SIZE_T NumberBytesRead = 0;
@@ -563,24 +605,20 @@ int main(int Argc, const char *Argv[]) {
           ReadProcessMemory(Process, OverlappingStart, Buffer.get(),
                             OverlappingSize, &NumberBytesRead);
       if (!Ret || NumberBytesRead != OverlappingSize) {
-        printf("ReadProcessMemory failed w/ GLE=%d, exiting.\n",
+        fmt::print("ReadProcessMemory failed w/ GLE={}, exiting\n",
                GetLastError());
         return EXIT_FAILURE;
       }
+
+      dbgprintf("Read region {}..\r", OverlappingStart);
 #endif
-
-      //
-      // OK we're done.
-      //
-
-      dbgprintf("Read region %p..\r", OverlappingStart);
-      NumberBytes += OverlappingSize;
-      AmountMb = NumberBytes / _1MB;
     }
-
-    printf("Locked %llu MBs..\r", AmountMb);
   }
 
-  printf("Done, locked %llu MBs!\n", AmountMb);
+  //
+  // OK we're done.
+  //
+
+  fmt::print("Done, locked {}!\n", BytesToHuman(LockedAmount));
   return EXIT_SUCCESS;
 }
