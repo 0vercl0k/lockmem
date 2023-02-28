@@ -87,11 +87,6 @@ struct Range_t {
 
     return {OverlapKind_t::No, {}};
   }
-
-  [[nodiscard]] static Range_t RightOpen(const uint64_t Start,
-                                         const uint64_t End) {
-    return {Start, End};
-  }
 };
 
 //
@@ -110,10 +105,6 @@ public:
     Ranges_t OverlappingRanges;
     for (const auto &Range : Ranges_) {
       for (const auto &Other : Others) {
-        if (Range.Start > Other.End) {
-          break;
-        }
-
         const auto &[Kind, OverlappingRange] = Range.Overlaps(Other);
         if (Kind != OverlapKind_t::No) {
           OverlappingRanges.Add(OverlappingRange);
@@ -127,10 +118,6 @@ public:
   Ranges_t Overlaps(const Range_t &Other) const {
     Ranges_t OverlappingRanges;
     for (const auto &Range : Ranges_) {
-      if (Other.Start > Range.End) {
-        return OverlappingRanges;
-      }
-
       const auto &[Kind, OverlappingRange] = Range.Overlaps(Other);
       if (Kind != OverlapKind_t::No) {
         OverlappingRanges.Ranges_.push_back(OverlappingRange);
