@@ -2,7 +2,6 @@
 #include <windows.h>
 
 #include <assert.h>
-#include <boost/icl/interval_set.hpp>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
@@ -33,8 +32,186 @@ extern "C" NTSYSCALLAPI NTSTATUS NTAPI NtLockVirtualMemory(HANDLE ProcessHandle,
                                                            PSIZE_T RegionSize,
                                                            ULONG MapType);
 
-using Interval_t = boost::icl::discrete_interval<uint64_t>;
-using Ranges_t = boost::icl::interval_set<uint64_t>;
+enum class OverlapKind_t {
+  BeforeStart,
+  AfterStartBeforeEnd,
+  AfterEnd,
+  BeforeStartAfterEnd,
+  No
+};
+
+struct Range_t {
+  uint64_t Start = 0;
+  uint64_t End = 0;
+
+  [[nodiscard]] uint64_t Size() const { return End - Start; }
+
+  [[nodiscard]] std::pair<OverlapKind_t, Range_t>
+  Overlaps(const Range_t &O) const {
+
+    //
+    // <> is the |O| range, [] is the |this| range.
+    //
+
+    //
+    // <-------[--->--------]
+    //
+
+    if (O.Start < Start && O.End >= Start && O.End <= End) {
+      return {OverlapKind_t::BeforeStart, {Start, O.End}};
+    }
+
+    //
+    // [-<-->--------]
+    //
+
+    if (O.Start >= Start && O.End <= End) {
+      return {OverlapKind_t::AfterStartBeforeEnd, {O.Start, O.End}};
+    }
+
+    //
+    // [-------<---]-------->
+    //
+
+    if (O.Start >= Start && O.Start <= End && O.End > End) {
+      return {OverlapKind_t::AfterEnd, {O.Start, End}};
+    }
+
+    //
+    // <---[----------]--->
+    //
+
+    if (O.Start <= Start && O.End >= End) {
+      return {OverlapKind_t::BeforeStartAfterEnd, {Start, End}};
+    }
+
+    return {OverlapKind_t::No, {}};
+  }
+
+  [[nodiscard]] static Range_t RightOpen(const uint64_t Start,
+                                         const uint64_t End) {
+    return {Start, End};
+  }
+};
+
+//
+// Ghetto interval tree.
+//
+
+class Ranges_t {
+private:
+  std::vector<Range_t> Ranges_;
+
+public:
+  auto begin() const { return Ranges_.begin(); }
+  auto end() const { return Ranges_.end(); }
+
+  Ranges_t Overlaps(const Ranges_t &Others) const {
+    Ranges_t OverlappingRanges;
+    for (const auto &Range : Ranges_) {
+      for (const auto &Other : Others) {
+        if (Range.Start > Other.End) {
+          break;
+        }
+
+        const auto &[Kind, OverlappingRange] = Range.Overlaps(Other);
+        if (Kind != OverlapKind_t::No) {
+          OverlappingRanges.Add(OverlappingRange);
+        }
+      }
+    }
+
+    return OverlappingRanges;
+  }
+
+  Ranges_t Overlaps(const Range_t &Other) const {
+    Ranges_t OverlappingRanges;
+    for (const auto &Range : Ranges_) {
+      if (Other.Start > Range.End) {
+        return OverlappingRanges;
+      }
+
+      const auto &[Kind, OverlappingRange] = Range.Overlaps(Other);
+      if (Kind != OverlapKind_t::No) {
+        OverlappingRanges.Ranges_.push_back(OverlappingRange);
+      }
+    }
+
+    return OverlappingRanges;
+  }
+
+  void Add(const Ranges_t &Ranges) {
+    for (const auto &Range : Ranges) {
+      Add(Range.Start, Range.End);
+    }
+  }
+
+  void Add(const Range_t &O) { Add(O.Start, O.End); }
+
+  void Add(const uint64_t Start, const uint64_t End) {
+    assert(End > Start);
+    Range_t New(Start, End);
+    std::vector<Range_t> NewRanges;
+    bool Inserted = false;
+    for (const auto &Range : Ranges_) {
+      if (New.Start > Range.End) {
+
+        //
+        // If the current interval is bigger than the candidate, we still need
+        // to figure out where to add it.
+        //
+
+        NewRanges.push_back(Range);
+      } else if (New.End < Range.Start) {
+
+        //
+        // The intervals are ordered from low to high; if the end of the new
+        // interval is before the candidate, we found a spot where to insert it
+        // (unless we already did that).
+        //
+
+        if (!Inserted) {
+
+          //
+          // Let's insert the interval.
+          //
+
+          NewRanges.push_back(New);
+          Inserted = true;
+        }
+
+        //
+        // Don't forget to insert the current candidate as well (we know they
+        // don't overlap)
+        //
+
+        NewRanges.push_back(Range);
+      } else {
+
+        //
+        // If the current interval overlaps with the candidate, merge them in.
+        //
+
+        New.Start = std::min(New.Start, Range.Start);
+        New.End = std::max(New.End, Range.End);
+      }
+    }
+
+    //
+    // If we got here before inserting the candidate, do it now.
+    //
+
+    if (!Inserted) {
+      NewRanges.push_back(New);
+    }
+
+    //
+    // Update our internal set.
+    //
+
+    Ranges_ = std::move(NewRanges);
+  }
+};
 
 struct BytesHuman_t {
   double Value;
@@ -48,12 +225,10 @@ template <> struct fmt::formatter<BytesHuman_t> : fmt::formatter<std::string> {
   }
 };
 
-template <> struct fmt::formatter<Interval_t> : fmt::formatter<std::string> {
+template <> struct fmt::formatter<Range_t> : fmt::formatter<std::string> {
   template <typename FormatContext>
-  auto format(const Interval_t &I, FormatContext &Ctx) const {
-    return fmt::format_to(Ctx.out(), "{}{:x}, {:x}{}",
-                          boost::icl::left_bracket(I), I.lower(), I.upper(),
-                          boost::icl::right_bracket(I));
+  auto format(const Range_t &R, FormatContext &Ctx) const {
+    return fmt::format_to(Ctx.out(), "[{:x}, {:x}(", R.Start, R.End);
   }
 };
 
@@ -175,7 +350,7 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
     // All right, we have a range!
     //
 
-    Ranges.insert(Interval_t::right_open(Start, End));
+    Ranges.Add(Start, End);
   }
 
   return Ranges;
@@ -185,8 +360,8 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
                                             const auto &Range) {
   const NTSTATUS STATUS_WORKING_SET_QUOTA = 0xc000'00a1;
   const uint32_t MAP_PROCESS = 1;
-  auto BaseAddress = PVOID(Range.lower());
-  SIZE_T RegionSize = boost::icl::size(Range);
+  auto BaseAddress = PVOID(Range.Start);
+  SIZE_T RegionSize = Range.Size();
   for (size_t Tries = 0; Tries < 10; Tries++) {
     const NTSTATUS Status =
         NtLockVirtualMemory(Process, &BaseAddress, &RegionSize, MAP_PROCESS);
@@ -215,7 +390,7 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
     MaximumWorkingSetSize *= 2;
     MinimumWorkingSetSize *= 2;
 
-    fmt::print("Growing working set to {}..\r",
+    fmt::print("Growing working set to {}..\n",
                BytesToHuman(MinimumWorkingSetSize));
 
     Flags = QUOTA_LIMITS_HARDWS_MIN_ENABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE;
@@ -347,12 +522,20 @@ template <typename Struct_t>
   Ranges_t StackRanges;
 #ifdef _WIN64
   assert(Tib._64.StackLimit < Tib._64.StackBase && Tib._64.StackBase > 0);
-  StackRanges.insert(
-      Interval_t::right_open(Tib._64.StackLimit, Tib._64.StackBase));
+  if ((Tib._64.StackLimit & 0xf'ff) != 0 || (Tib._64.StackBase & 0xf'ff) != 0) {
+    fmt::print("TIB64 is not page aligned, bailing\n");
+    return {};
+  }
+
+  StackRanges.Add(Tib._64.StackLimit, Tib._64.StackBase);
 #else
   assert(Tib._32.StackLimit < Tib._32.StackBase && Tib._32.StackBase > 0);
-  StackRanges.insert(
-      Interval_t::right_open(Tib._32.StackLimit, Tib._32.StackBase));
+  if ((Tib._32.StackLimit & 0xf'ff) != 0 || (Tib._32.StackBase & 0xf'ff) != 0) {
+    fmt::print("TIB32 is not page aligned, bailing\n");
+    return {};
+  }
+
+  StackRanges.Add(Tib._32.StackLimit, Tib._32.StackBase);
 #endif
 
 #ifdef _WIN64
@@ -378,8 +561,12 @@ template <typename Struct_t>
   }
 
   assert(Tib._32.StackLimit < Tib._32.StackBase && Tib._32.StackBase);
-  StackRanges.insert(
-      Interval_t::right_open(Tib._32.StackLimit, Tib._32.StackBase));
+  if ((Tib._32.StackLimit & 0xf'ff) != 0 || (Tib._32.StackBase & 0xf'ff) != 0) {
+    fmt::print("TIBWOW6432 is not page aligned, bailing\n");
+    return {};
+  }
+
+  StackRanges.Add(Tib._32.StackLimit, Tib._32.StackBase);
 #endif
 
   return StackRanges;
@@ -427,7 +614,7 @@ template <typename Struct_t>
 
     for (const auto &Range : *Ranges) {
       fmt::print("TID {} Stack Range: {}\n", Entry.th32ThreadID, Range);
-      Stacks.insert(Range);
+      Stacks.Add(Range);
     }
   } while (Thread32Next(Snapshot, &Entry));
 
@@ -528,12 +715,20 @@ int main(int Argc, const char *Argv[]) {
   }
 
   //
-  // Get the user ranges in there as well.
+  // If we have a range filter, bring it in as well.
   //
 
   if (Opts.Ranges) {
+
+    //
+    // If we already have ranges defined in it, then we need to find the
+    // overlapping ranges.
+    //
+
     if (AllowRanges) {
-      *AllowRanges += *Opts.Ranges;
+      auto OverlappingRanges = AllowRanges->Overlaps(*Opts.Ranges);
+      AllowRanges = std::move(OverlappingRanges);
+      AllowRanges->Add(*Opts.Ranges);
     } else {
       AllowRanges = *Opts.Ranges;
     }
@@ -543,6 +738,8 @@ int main(int Argc, const char *Argv[]) {
   // Iterate through memory ranges of the process.
   //
 
+  fmt::memory_buffer IoBuffer;
+  size_t PreviousLineSize = 0;
   fmt::print("Got a handle on PID {}\n", ProcessId);
   MEMORY_BASIC_INFORMATION MemoryInfo;
   uint64_t LockedAmount = 0;
@@ -556,8 +753,8 @@ int main(int Argc, const char *Argv[]) {
 
     const auto BaseAddress = MemoryInfo.BaseAddress;
     const auto RegionSize = MemoryInfo.RegionSize;
-    const auto &RegionRange = Interval_t::right_open(
-        uint64_t(BaseAddress), uint64_t(BaseAddress) + RegionSize);
+    const Range_t RegionRange(uint64_t(BaseAddress),
+                              uint64_t(BaseAddress) + RegionSize);
     const uint32_t BadProtectBits = PAGE_GUARD | PAGE_NOACCESS;
     if (MemoryInfo.Protect & BadProtectBits) {
       dbgprintf("Skipping {} because of protect bad bits..\n", RegionRange);
@@ -579,10 +776,25 @@ int main(int Argc, const char *Argv[]) {
     //
 
     Ranges_t OverlappingRanges;
-    OverlappingRanges.insert(RegionRange);
     if (AllowRanges) {
-      OverlappingRanges = *AllowRanges & RegionRange;
+
+      //
+      // If we have range filters, calculate the overlapping ranges.
+      //
+
+      OverlappingRanges = AllowRanges->Overlaps(RegionRange);
+    } else {
+
+      //
+      // If we don't, oh well, let's use the entire region as is!
+      //
+
+      OverlappingRanges.Add(RegionRange);
     }
+
+    //
+    // Walk the overlapping ranges to lock them in.
+    //
 
     for (const auto &OverlappingRange : OverlappingRanges) {
 
@@ -595,23 +807,25 @@ int main(int Argc, const char *Argv[]) {
         return EXIT_FAILURE;
       }
 
-      LockedAmount += boost::icl::size(OverlappingRange);
-      fmt::print("Locked {}..\r", BytesToHuman(LockedAmount));
+      LockedAmount += OverlappingRange.Size();
 
-#if 0
-      auto Buffer = std::make_unique<uint8_t[]>(OverlappingSize);
-      SIZE_T NumberBytesRead = 0;
-      const bool Ret =
-          ReadProcessMemory(Process, OverlappingStart, Buffer.get(),
-                            OverlappingSize, &NumberBytesRead);
-      if (!Ret || NumberBytesRead != OverlappingSize) {
-        fmt::print("ReadProcessMemory failed w/ GLE={}, exiting\n",
-               GetLastError());
-        return EXIT_FAILURE;
+      //
+      // Do our best to overwrite the previous line we displayed..
+      //
+
+      fmt::detail::vformat_to(
+          IoBuffer, fmt::string_view("\b\rLocked {}: {}.."),
+          fmt::make_format_args(BytesToHuman(LockedAmount), OverlappingRange));
+      const size_t SizeAfter = IoBuffer.size();
+      fmt::detail::print(stdout, {IoBuffer.data(), IoBuffer.size()});
+      if (IoBuffer.size() < PreviousLineSize) {
+        fmt::print("{:{}}\n", "", PreviousLineSize - IoBuffer.size());
+      } else {
+        fmt::print("\n");
       }
 
-      dbgprintf("Read region {}..\r", OverlappingStart);
-#endif
+      PreviousLineSize = IoBuffer.size();
+      IoBuffer.resize(0);
     }
   }
 
@@ -619,6 +833,6 @@ int main(int Argc, const char *Argv[]) {
   // OK we're done.
   //
 
-  fmt::print("Done, locked {}!\n", BytesToHuman(LockedAmount));
+  fmt::print("\nDone, locked {}!\n", BytesToHuman(LockedAmount));
   return EXIT_SUCCESS;
 }
