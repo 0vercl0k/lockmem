@@ -15,9 +15,9 @@
 #pragma comment(lib, "ntdll.lib")
 
 #ifdef NDEBUG
-#define dbgprintf(...) /**/
+#define dbgprint(...) /**/
 #else
-#define dbgprintf(...) fmt::print(__VA_ARGS__)
+#define dbgprint(...) fmt::print(__VA_ARGS__)
 #endif
 
 enum class THREADINFOCLASS : uint32_t { ThreadBasicInformation };
@@ -377,8 +377,8 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
     MaximumWorkingSetSize *= 2;
     MinimumWorkingSetSize *= 2;
 
-    fmt::print("Growing working set to {}..\n",
-               BytesToHuman(MinimumWorkingSetSize));
+    dbgprint("Growing working set to {}..\n",
+             BytesToHuman(MinimumWorkingSetSize));
 
     Flags = QUOTA_LIMITS_HARDWS_MIN_ENABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE;
 
@@ -600,7 +600,7 @@ template <typename Struct_t>
     }
 
     for (const auto &Range : *Ranges) {
-      fmt::print("TID {} Stack Range: {}\n", Entry.th32ThreadID, Range);
+      dbgprint("TID {} Stack Range: {}\n", Entry.th32ThreadID, Range);
       Stacks.Add(Range);
     }
   } while (Thread32Next(Snapshot, &Entry));
@@ -725,8 +725,6 @@ int main(int Argc, const char *Argv[]) {
   // Iterate through memory ranges of the process.
   //
 
-  fmt::memory_buffer IoBuffer;
-  size_t PreviousLineSize = 0;
   fmt::print("Got a handle on PID {}\n", ProcessId);
   MEMORY_BASIC_INFORMATION MemoryInfo;
   uint64_t LockedAmount = 0;
@@ -744,7 +742,7 @@ int main(int Argc, const char *Argv[]) {
                               uint64_t(BaseAddress) + RegionSize);
     const uint32_t BadProtectBits = PAGE_GUARD | PAGE_NOACCESS;
     if (MemoryInfo.Protect & BadProtectBits) {
-      dbgprintf("Skipping {} because of protect bad bits..\n", RegionRange);
+      dbgprint("Skipping {} because of protect bad bits..\n", RegionRange);
       continue;
     }
 
@@ -754,7 +752,7 @@ int main(int Argc, const char *Argv[]) {
 
     const uint32_t BadStatetBits = MEM_FREE | MEM_RESERVE;
     if (MemoryInfo.State & BadStatetBits) {
-      dbgprintf("Skipping {} because of state bad bits..\n", RegionRange);
+      dbgprint("Skipping {} because of state bad bits..\n", RegionRange);
       continue;
     }
 
@@ -800,19 +798,8 @@ int main(int Argc, const char *Argv[]) {
       // Do our best to overwrite the previous line we displayed..
       //
 
-      fmt::detail::vformat_to(
-          IoBuffer, fmt::string_view("\b\rLocked {}: {}.."),
-          fmt::make_format_args(BytesToHuman(LockedAmount), OverlappingRange));
-      const size_t SizeAfter = IoBuffer.size();
-      fmt::detail::print(stdout, {IoBuffer.data(), IoBuffer.size()});
-      if (IoBuffer.size() < PreviousLineSize) {
-        fmt::print("{:{}}\n", "", PreviousLineSize - IoBuffer.size());
-      } else {
-        fmt::print("\n");
-      }
-
-      PreviousLineSize = IoBuffer.size();
-      IoBuffer.resize(0);
+      fmt::print("\33[2K\rLocked {}: {}..", BytesToHuman(LockedAmount),
+                 OverlappingRange);
     }
   }
 
