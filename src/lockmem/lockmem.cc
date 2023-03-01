@@ -798,8 +798,13 @@ int main(int Argc, const char *Argv[]) {
       // Do our best to overwrite the previous line we displayed..
       //
 
+#ifdef NDEBUG
       fmt::print("\33[2K\rLocked {}: {}..", BytesToHuman(LockedAmount),
                  OverlappingRange);
+#else
+      fmt::print("Locked {}: {}..\n", BytesToHuman(LockedAmount),
+                 OverlappingRange);
+#endif
     }
   }
 
