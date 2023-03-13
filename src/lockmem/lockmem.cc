@@ -22,15 +22,69 @@
 
 enum class THREADINFOCLASS : uint32_t { ThreadBasicInformation };
 
+//
+// Credits to the systeminformer folks <3:
+// https://github.com/winsiderss/systeminformer/blob/e544ff2c1f1fbac2f38e16d9e2ceb7e1a616962a/phnt/include/ntrtl.h#L4224
+//
+
+struct RTL_HEAP_INFORMATION_V2 {
+  void *BaseAddress;
+  uint32_t Flags;
+  uint16_t EntryOverhead;
+  uint16_t CreatorBackTraceIndex;
+  size_t BytesAllocated;
+  size_t BytesCommitted;
+  uint32_t NumberOfTags;
+  uint32_t NumberOfEntries;
+  uint32_t NumberOfPseudoTags;
+  uint32_t PseudoTagGranularity;
+  uint32_t Reserved[5];
+  void *Tags;
+  void *Entries;
+  uint64_t HeapTag;
+};
+
+struct RTL_PROCESS_HEAPS_V2 {
+  uint32_t NumberOfHeaps;
+  RTL_HEAP_INFORMATION_V2 Heaps[1];
+};
+
+struct RTL_DEBUG_INFORMATION {
+  HANDLE SectionHandleClient;
+  void *ViewBaseClient;
+  void *ViewBaseTarget;
+  uintptr_t ViewBaseDelta;
+  HANDLE EventPairClient;
+  HANDLE EventPairTarget;
+  HANDLE TargetProcessId;
+  HANDLE TargetThreadHandle;
+  uint32_t Flags;
+  size_t OffsetFree;
+  size_t CommitSize;
+  size_t ViewSize;
+  void *ModulesEx;
+  void *BackTraces;
+  RTL_PROCESS_HEAPS_V2 *Heaps;
+};
+
+extern "C" RTL_DEBUG_INFORMATION *NTAPI
+RtlCreateQueryDebugBuffer(uint32_t Size, bool EventPair);
+
+extern "C" uint32_t NTAPI
+RtlDestroyQueryDebugBuffer(RTL_DEBUG_INFORMATION *DebugBuffer);
+
+extern "C" uint32_t NTAPI RtlQueryProcessDebugInformation(
+    uint32_t UniqueProcessId, uint32_t Flags, RTL_DEBUG_INFORMATION *Buffer);
+
 extern "C" uint32_t NTAPI NtQueryInformationThread(
     HANDLE ThreadHandle, THREADINFOCLASS ThreadInformationClass,
     PVOID ThreadInformation, ULONG ThreadInformationLength,
     PULONG ReturnLength);
 
-extern "C" NTSYSCALLAPI NTSTATUS NTAPI NtLockVirtualMemory(HANDLE ProcessHandle,
-                                                           PVOID *BaseAddress,
-                                                           PSIZE_T RegionSize,
-                                                           ULONG MapType);
+extern "C" uint32_t NTAPI NtLockVirtualMemory(HANDLE ProcessHandle,
+                                              PVOID *BaseAddress,
+                                              PSIZE_T RegionSize,
+                                              ULONG MapType);
 
 enum class OverlapKind_t {
   BeforeStart,
@@ -215,7 +269,7 @@ template <> struct fmt::formatter<BytesHuman_t> : fmt::formatter<std::string> {
 template <> struct fmt::formatter<Range_t> : fmt::formatter<std::string> {
   template <typename FormatContext>
   auto format(const Range_t &R, FormatContext &Ctx) const {
-    return fmt::format_to(Ctx.out(), "[{:x}, {:x}(", R.Start, R.End);
+    return fmt::format_to(Ctx.out(), "[{:#x}, {:#x}(", R.Start, R.End);
   }
 };
 
@@ -229,12 +283,15 @@ template <typename F_t> [[nodiscard]] auto finally(F_t &&f) noexcept {
         f_();
       }
     }
+    void Trigger() const noexcept { f_(); }
   };
 
   return Finally_t(std::move(f));
 }
 
-[[nodiscard]] bool NT_SUCCESS(const NTSTATUS Status) { return Status >= 0; }
+[[nodiscard]] bool NT_SUCCESS(const uint32_t Status) {
+  return (Status & 0x80'00'00'00) == 0;
+}
 
 //
 // Utility that is used to print bytes for human.
@@ -345,12 +402,13 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
 
 [[nodiscard]] bool GrownAndLockInWorkingSet(const HANDLE Process,
                                             const auto &Range) {
-  const NTSTATUS STATUS_WORKING_SET_QUOTA = 0xc000'00a1;
+  const uint32_t STATUS_WORKING_SET_QUOTA = 0xc000'00a1;
   const uint32_t MAP_PROCESS = 1;
   auto BaseAddress = PVOID(Range.Start);
   SIZE_T RegionSize = Range.Size();
+  assert((uintptr_t(BaseAddress) & 0xf'ff) == 0 && RegionSize > 0);
   for (size_t Tries = 0; Tries < 10; Tries++) {
-    const NTSTATUS Status =
+    const uint32_t Status =
         NtLockVirtualMemory(Process, &BaseAddress, &RegionSize, MAP_PROCESS);
 
     if (NT_SUCCESS(Status)) {
@@ -358,8 +416,8 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
     }
 
     if (Status != STATUS_WORKING_SET_QUOTA) {
-      fmt::print("NtLockVirtualMemory failed w/ {} for {}, bailing\n", Status,
-                 BaseAddress);
+      fmt::print("NtLockVirtualMemory failed w/ {:x} for {}/{}, bailing\n",
+                 Status, BaseAddress, RegionSize);
       return false;
     }
 
@@ -425,6 +483,86 @@ std::optional<Ranges_t> ParseRanges(std::string String) {
   return Pid;
 }
 
+[[nodiscard]] std::optional<Ranges_t> GetHeapRegions(const uint32_t Pid) {
+  Ranges_t Heaps;
+
+  //
+  // Using CreateToolhelp32Snapshot/TH32CS_SNAPHEAPLIST &
+  // Heap32ListFirst/Heap32ListNext & Heap32First/Heap32Next is **incredibly
+  // slow**, so using another way.
+  //
+
+  const uint32_t RTL_QUERY_PROCESS_HEAP_SUMMARY = 0x0000'0004;
+  const uint32_t RTL_QUERY_PROCESS_HEAP_ENTRIES = 0x0000'0010;
+  const uint32_t RTL_QUERY_PROCESS_NONINVASIVE = 0x8000'0000;
+  const uint16_t RTL_HEAP_BUSY = 1;
+  const uint16_t RTL_HEAP_SEGMENT = 2;
+  const uint32_t _10m = 0x1'000 * 0x1'000 * 10;
+  RTL_DEBUG_INFORMATION *DebugBuffer = nullptr;
+  const auto &CleanDebugBuffer = finally([&] {
+    if (DebugBuffer) {
+      RtlDestroyQueryDebugBuffer(DebugBuffer);
+      DebugBuffer = nullptr;
+    }
+  });
+
+  uint32_t Size = 0x1'00'00;
+  while (Size < _10m) {
+    DebugBuffer = RtlCreateQueryDebugBuffer(Size, false);
+    if (!DebugBuffer) {
+      fmt::print("RtlCreateQueryDebugBuffer failed\n");
+      return {};
+    }
+
+    const uint32_t Flags = RTL_QUERY_PROCESS_HEAP_SUMMARY |
+                           RTL_QUERY_PROCESS_HEAP_ENTRIES |
+                           RTL_QUERY_PROCESS_NONINVASIVE;
+
+    const uint32_t Status =
+        RtlQueryProcessDebugInformation(Pid, Flags, DebugBuffer);
+    if (NT_SUCCESS(Status)) {
+      break;
+    }
+
+    if (Status != STATUS_NO_MEMORY) {
+      fmt::print("RtlQueryProcessDebugInformation failed w/ {:x}\n", Status);
+      return {};
+    }
+
+    CleanDebugBuffer.Trigger();
+    Size <<= 1;
+  }
+
+  //
+  // If we haven't managed to allocate a debug buffer, we bail.
+  //
+
+  if (!DebugBuffer) {
+    fmt::print("Failed to allocate a DebugBuffer\n");
+    return {};
+  }
+
+  if (!DebugBuffer->Heaps) {
+    fmt::print("No Heaps in the DebugBuffer\n");
+    return {};
+  }
+
+  for (uint32_t HeapIdx = 0; HeapIdx < DebugBuffer->Heaps->NumberOfHeaps;
+       HeapIdx++) {
+    const auto &Heap = DebugBuffer->Heaps->Heaps[HeapIdx];
+    dbgprint("  Heap {}: {}: {} commited, {} allocated, {} entries\n", HeapIdx,
+             Heap.BaseAddress, BytesToHuman(Heap.BytesCommitted),
+             BytesToHuman(Heap.BytesAllocated), Heap.NumberOfEntries);
+    const auto Start = uint64_t(Heap.BaseAddress);
+    const auto End = Start + Heap.BytesCommitted;
+    const auto Remainder = End % 0x1'000;
+    const auto AlignedEnd = Remainder ? End + (0x1'000 - Remainder) : End;
+    Heaps.Add(Start, AlignedEnd);
+  }
+
+  return Heaps;
+}
+
 [[nodiscard]] bool VirtRead(const uintptr_t RemoteAddress, void *Buffer,
                             const size_t BufferLength,
                             const HANDLE Process = GetCurrentProcess()) {
@@ -479,7 +617,7 @@ template <typename Struct_t>
   const uint32_t Status = NtQueryInformationThread(
       Thread, THREADINFOCLASS::ThreadBasicInformation, &ThreadInformation,
       sizeof(ThreadInformation), &Length);
-  if (Status != 0 || Length != sizeof(ThreadInformation)) {
+  if (!NT_SUCCESS(Status) || Length != sizeof(ThreadInformation)) {
     fmt::print("NtQueryInformationThread failed w/ {}, bailing\n", Status);
     return {};
   }
@@ -510,7 +648,9 @@ template <typename Struct_t>
 #ifdef _WIN64
   assert(Tib._64.StackLimit < Tib._64.StackBase && Tib._64.StackBase > 0);
   if ((Tib._64.StackLimit & 0xf'ff) != 0 || (Tib._64.StackBase & 0xf'ff) != 0) {
-    fmt::print("TIB64 is not page aligned, bailing\n");
+    fmt::print(
+        "TIB64 is not page aligned (StackLimit={:x}, StackBase={:x}, bailing\n",
+        Tib._64.StackLimit, Tib._64.StackBase);
     return {};
   }
 
@@ -600,7 +740,7 @@ template <typename Struct_t>
     }
 
     for (const auto &Range : *Ranges) {
-      dbgprint("TID {} Stack Range: {}\n", Entry.th32ThreadID, Range);
+      dbgprint("  TID {} Stack Range: {}\n", Entry.th32ThreadID, Range);
       Stacks.Add(Range);
     }
   } while (Thread32Next(Snapshot, &Entry));
@@ -612,6 +752,7 @@ struct Opts_t {
   std::optional<std::string> NameOrPid;
   std::optional<Ranges_t> Ranges;
   bool Stacks = false;
+  bool Heaps = false;
 };
 
 int main(int Argc, const char *Argv[]) {
@@ -638,6 +779,8 @@ int main(int Argc, const char *Argv[]) {
       Idx++;
     } else if (Arg == "--stacks") {
       Opts.Stacks = true;
+    } else if (Arg == "--heaps") {
+      Opts.Heaps = true;
     } else {
       Opts.NameOrPid = Arg;
     }
@@ -648,9 +791,8 @@ int main(int Argc, const char *Argv[]) {
   //
 
   if (!Opts.NameOrPid) {
-    fmt::print(
-        "./lockmem [--ranges 0-0x1000,0x2000+0x1000,..] [--stacks] <process "
-        "name | pid>\n");
+    fmt::print("./lockmem [--ranges 0-0x1000,0x2000+0x1000,..] [--stacks] "
+               "[--heaps] <process name | pid>\n");
     return EXIT_FAILURE;
   }
 
@@ -694,10 +836,30 @@ int main(int Argc, const char *Argv[]) {
 
   std::optional<Ranges_t> AllowRanges;
   if (Opts.Stacks) {
+    fmt::print("Enumerating stacks..\n");
     AllowRanges = GetStackRanges(Process, ProcessId);
     if (!AllowRanges) {
-      fmt::print("GetStacks failed, exiting\n");
+      fmt::print("GetStackRanges failed, exiting\n");
       return EXIT_FAILURE;
+    }
+  }
+
+  //
+  // Get heaps.
+  //
+
+  if (Opts.Heaps) {
+    fmt::print("Enumerating heaps..\n");
+    auto Heaps = GetHeapRegions(ProcessId);
+    if (!Heaps) {
+      fmt::print("GetHeapRegions failed, exiting\n");
+      return EXIT_FAILURE;
+    }
+
+    if (!AllowRanges) {
+      AllowRanges = std::move(Heaps);
+    } else {
+      AllowRanges->Add(*Heaps);
     }
   }
 
