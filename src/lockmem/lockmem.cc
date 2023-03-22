@@ -108,11 +108,19 @@ struct Range_t {
     //
 
     //
-    // <-------[--->--------]
+    // <-----> [    ] / [     ] <---->
     //
 
-    if (O.Start < Start && O.End >= Start && O.End <= End) {
-      return {OverlapKind_t::BeforeStart, {Start, O.End}};
+    if (O.End < Start || O.Start > End) {
+      return {OverlapKind_t::No, {}};
+    }
+
+    //
+    // <---[----------]--->
+    //
+
+    if (O.Start <= Start && O.End >= End) {
+      return {OverlapKind_t::BeforeStartAfterEnd, {Start, End}};
     }
 
     //
@@ -124,22 +132,23 @@ struct Range_t {
     }
 
     //
+    // <-------[--->--------]
+    //
+
+    if (O.Start < Start && O.End > Start) {
+      return {OverlapKind_t::BeforeStart, {Start, O.End}};
+    }
+
+    //
     // [-------<---]-------->
     //
 
-    if (O.Start >= Start && O.Start <= End && O.End > End) {
+    if (O.Start >= Start && O.End > End) {
       return {OverlapKind_t::AfterEnd, {O.Start, End}};
     }
 
-    //
-    // <---[----------]--->
-    //
-
-    if (O.Start <= Start && O.End >= End) {
-      return {OverlapKind_t::BeforeStartAfterEnd, {Start, End}};
-    }
-
-    return {OverlapKind_t::No, {}};
+    assert(false);
+    std::abort();
   }
 };
 
@@ -157,24 +166,21 @@ public:
 
   Ranges_t Overlaps(const Ranges_t &Others) const {
     Ranges_t OverlappingRanges;
-    for (const auto &Range : Ranges_) {
-      for (const auto &Other : Others) {
-        const auto &[Kind, OverlappingRange] = Range.Overlaps(Other);
-        if (Kind != OverlapKind_t::No) {
-          OverlappingRanges.Add(OverlappingRange);
-        }
-      }
+    for (const auto &Other : Others) {
+      const auto &OverlappingRange = Overlaps(Other);
+      OverlappingRanges.Add(OverlappingRange);
     }
 
     return OverlappingRanges;
   }
 
   Ranges_t Overlaps(const Range_t &Other) const {
+    assert(Other.End > Other.Start && (Other.End - Other.Start) > 0);
     Ranges_t OverlappingRanges;
     for (const auto &Range : Ranges_) {
       const auto &[Kind, OverlappingRange] = Range.Overlaps(Other);
       if (Kind != OverlapKind_t::No) {
-        OverlappingRanges.Ranges_.push_back(OverlappingRange);
+        OverlappingRanges.Add(OverlappingRange);
       }
     }
 
@@ -190,7 +196,7 @@ public:
   void Add(const Range_t &O) { Add(O.Start, O.End); }
 
   void Add(const uint64_t Start, const uint64_t End) {
-    assert(End > Start);
+    assert(End > Start && (End - Start) > 0);
     Range_t New(Start, End);
     std::vector<Range_t> NewRanges;
     bool Inserted = false;
