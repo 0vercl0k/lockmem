@@ -761,6 +761,45 @@ struct Opts_t {
   bool Heaps = false;
 };
 
+[[nodiscard]] bool SetPrivilege(const HANDLE Token, const char *Priv) {
+  LUID Luid = {};
+
+  if (!LookupPrivilegeValueA(nullptr, Priv, &Luid)) {
+    dbgprint("LookupPrivilegeValueA failed w/ GLE={}\n", GetLastError());
+    return false;
+  }
+
+  TOKEN_PRIVILEGES TokenPrivs = {};
+  TokenPrivs.PrivilegeCount = 1;
+  TokenPrivs.Privileges[0].Luid = Luid;
+  TokenPrivs.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+  if (!AdjustTokenPrivileges(Token, false, &TokenPrivs, sizeof(TokenPrivs),
+                             nullptr, nullptr)) {
+    dbgprint("AdjustTokenPrivileges failed w/ GLE={}\n", GetLastError());
+    return false;
+  }
+
+  if (GetLastError() == ERROR_NOT_ALL_ASSIGNED) {
+
+    return false;
+  }
+
+  return true;
+}
+
+[[nodiscard]] bool
+SetDebugPrivilege(const HANDLE Process = GetCurrentProcess()) {
+  HANDLE Token = nullptr;
+  if (!OpenProcessToken(Process, TOKEN_ADJUST_PRIVILEGES, &Token)) {
+    dbgprint("OpenProcessToken failed w/ GLE={}\n", GetLastError());
+    return false;
+  }
+
+  const auto &CloseToken = finally([&] { CloseHandle(Token); });
+  return SetPrivilege(Token, SE_DEBUG_NAME);
+}
+
 int main(int Argc, const char *Argv[]) {
 
   //
@@ -823,15 +862,49 @@ int main(int Argc, const char *Argv[]) {
   // Open the target process.
   //
 
-  const HANDLE Process =
-      OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_INFORMATION |
-                      PROCESS_VM_OPERATION | PROCESS_VM_READ,
-                  false, ProcessId);
+  HANDLE Process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_INFORMATION |
+                                   PROCESS_VM_OPERATION | PROCESS_VM_READ,
+                               false, ProcessId);
 
   if (!Process) {
-    fmt::print("OpenProcess {} failed w/ GLE={}, exiting\n", Argv[1],
-               GetLastError());
-    return EXIT_FAILURE;
+    const auto &GLE = GetLastError();
+    if (GLE != ERROR_ACCESS_DENIED) {
+      fmt::print("OpenProcess {} failed w/ GLE={}, exiting\n", Argv[1], GLE);
+      return EXIT_FAILURE;
+    }
+
+    //
+    // If OpenProcess failed w/ ACCESS_DENIED, then let's try to turn on
+    // SeDebugPrivilege on our token and retry.
+    //
+
+    fmt::print("Got access denied when opening {}, let's try to get "
+               "SeDebugPrivilege..\n",
+               Argv[1], GLE);
+
+    //
+    // Try to get SeDebugPrivilege.
+    //
+
+    if (!SetDebugPrivilege()) {
+      fmt::print("SetDebugPrivilege failed (try from an Administrator "
+                 "prompt?), exiting\n");
+      return EXIT_FAILURE;
+    }
+
+    //
+    // Try to OpenProcess again.
+    //
+
+    Process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_INFORMATION |
+                              PROCESS_VM_OPERATION | PROCESS_VM_READ,
+                          false, ProcessId);
+    if (!Process) {
+      fmt::print(
+          "OpenProcess {} w/ SeDebugPrivilege failed w/ GLE={}, exiting\n",
+          Argv[1], GetLastError());
+      return EXIT_FAILURE;
+    }
   }
 
   const auto &CloseProcess = finally([&] { CloseHandle(Process); });
