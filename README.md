@@ -1,3 +1,7 @@
+## ⚠️ Superseded by `lockmem-rs` ⚠️
+
+[lockmem-rs](https://github.com/0vercl0k/lockmem-rs) is the Rust replacement that I maintain.
+
 # lockmem
 ![Builds](https://github.com/0vercl0k/lockmem/workflows/Builds/badge.svg)
 
